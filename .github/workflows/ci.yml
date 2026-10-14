@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {} # manual trigger (no inputs)
+
+jobs:
+  deny:
+    name: Dependency audit (licenses / advisories)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  lint:
+    name: Lint (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest # mainline, Apple Silicon
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+          cache: false # caching is handled by rust-cache
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install Linux window system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+      - name: Format check
+        if: runner.os == 'macOS' # platform-independent, run once
+        run: cargo fmt --all --check
+      - name: Clippy (incl. tests)
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
+
+  assets:
+    name: Preprocess frame assets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install ffmpeg and zstd
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg zstd
+      - name: Transcode with ffmpeg (keying, 320x180@15fps RGBA, zstd)
+        run: scripts/preprocess_assets.sh 8
+      - name: Package
+        run: tar -cf assets.tar assets
+      - uses: actions/upload-artifact@v7
+        with:
+          name: assets
+          path: assets.tar
+          retention-days: 1
+
+  test:
+    name: Test (${{ matrix.target }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install Linux window system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+      - name: Unit tests
+        run: cargo test --target ${{ matrix.target }}
+
+  coverage:
+    name: Coverage (logic layer)
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Install Linux window system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+      # Logic layer (library/anim/logging/assets/tray) line coverage gate;
+      # GUI/platform/bootstrap files (window/platform/render/main) require a real
+      # window and GPU and are excluded from the statistics
+      - name: Coverage gate (>= 95% lines, logic layer)
+        run: |
+          cargo llvm-cov --summary-only \
+            --ignore-filename-regex '(window|platform|render|main)\.rs' \
+            --fail-under-lines 95
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [test, assets]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install Linux window system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+      - name: Download frame assets
+        uses: actions/download-artifact@v8
+        with:
+          name: assets
+      - name: Extract frame assets
+        shell: bash
+        run: tar -xf assets.tar
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+      # 完整分发包（含资产；macOS 为 .app zip，ad-hoc 签名）
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: scripts/package-macos.sh "${{ matrix.target }}" "$(git rev-parse --short HEAD)"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Target "${{ matrix.target }}" -Version "$env:GITHUB_SHA".Substring(0,7)
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/package-linux.sh "${{ matrix.target }}" "$(git rev-parse --short HEAD)"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            ds-pet-*.zip
+            ds-pet-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,4 @@
+# Windows MSVC 静态链接 CRT：免除终端用户安装 VC++ Redistributable
+# （vcruntime140.dll 缺失是 MSVC 动态运行时的通病；代价是 exe 增大约 1MB）
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

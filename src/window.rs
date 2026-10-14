@@ -1,0 +1,692 @@
+//! 宠物窗口：渲染与交互（拖动/惯性、双击多开、单击、右键菜单、点击穿透、行走）
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
+
+use crate::UserEvent;
+use crate::anim::{Anim, Mode, Tick, WalkDir, curve_at, random_pick};
+use crate::library::{ClipId, FRAME_BYTES, FRAME_H, FRAME_W, Library};
+use crate::platform;
+use crate::render::{Gpu, PetSurface};
+
+/// 窗口逻辑尺寸（= 帧尺寸；整数倍缩放像素精确）
+pub const WIN_W: f64 = 320.0;
+pub const WIN_H: f64 = 180.0;
+const DOUBLE_CLICK_SECS: f64 = 0.4;
+const CLICK_SECS: f64 = 0.35;
+const CLICK_MOVE_PX: f64 = 6.0;
+/// 点击穿透 alpha 阈值
+const HIT_ALPHA: u8 = 24;
+const INERTIA_DECAY_PER_MS: f64 = 0.976_144;
+const INERTIA_STOP: f64 = 0.02;
+pub const MAX_PETS: usize = 8;
+
+pub enum WindowRequest {
+    /// 在指定物理坐标（窗口内）弹出右键菜单
+    ShowMenu(i32, i32),
+}
+
+struct DragState {
+    /// 按下时 光标全局位置 - 窗口位置（逻辑点）
+    offset: (f64, f64),
+}
+
+pub struct PetWindow {
+    pub window: Arc<Window>,
+    surface: PetSurface,
+    /// 共享 GPU 上下文（App 持有）
+    gpu: Arc<Gpu>,
+    #[cfg(target_os = "windows")]
+    hwnd: Option<windows::Win32::Foundation::HWND>,
+    #[cfg(target_os = "windows")]
+    bitmap: Option<crate::platform::windows_layered::LayeredBitmap>,
+    /// 镜像帧的临时翻转缓冲（避免每帧分配）
+    mirror_scratch: Vec<u8>,
+    pub anim: Anim,
+    lib: Arc<Library>,
+    proxy: EventLoopProxy<UserEvent>,
+
+    drag: Option<DragState>,
+    /// 拖动速度 EMA（逻辑 px/ms），松手后作惯性初速
+    velocity: (f64, f64),
+    last_drag_move: Option<(Instant, (f64, f64))>, // (时刻, 窗口逻辑位置)
+    last_tick_at: Instant,
+
+    /// 光标窗口内位置（逻辑点，左上原点）；被穿透忽略期间由轮询维护
+    cursor_local: (f64, f64),
+    /// 最近一次 `CursorMoved` 的物理坐标（右键菜单弹出示位置）
+    cursor_phys: (f64, f64),
+    ignoring_cursor: bool,
+
+    last_press: Option<Instant>,
+    press_pos: (f64, f64),
+    /// 双击后抑制本次松手的单击判定
+    suppress_single: bool,
+
+    /// 行走状态（步幅已换算到逻辑像素：`stride_native` × 320/640）
+    walk_stride: f64,
+    walk_last_curve: f64,
+}
+
+impl PetWindow {
+    pub fn new(
+        event_loop: &ActiveEventLoop,
+        lib: Arc<Library>,
+        proxy: EventLoopProxy<UserEvent>,
+        gpu: Arc<Gpu>,
+        pos: Option<(f64, f64)>,
+        frame_offset: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let attrs = Window::default_attributes()
+            .with_title("ds-pet")
+            .with_inner_size(LogicalSize::new(WIN_W, WIN_H))
+            .with_transparent(true)
+            .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_resizable(false)
+            .with_active(false);
+        let window: Arc<Window> = Arc::new(event_loop.create_window(attrs)?);
+        // Windows：物理尺寸取整到帧尺寸整数倍（非整数 DPI 下 nearest 采样不均匀会发糊）
+        #[cfg(target_os = "windows")]
+        {
+            let scale = window.scale_factor().max(1.0).round().max(1.0) as u32;
+            let phys =
+                winit::dpi::PhysicalSize::new((WIN_W as u32) * scale, (WIN_H as u32) * scale);
+            let _ = window.request_inner_size(phys);
+        }
+        if let Some((x, y)) = pos {
+            window.set_outer_position(LogicalPosition::new(x, y));
+        }
+        #[cfg(target_os = "windows")]
+        let (hwnd, bitmap) = {
+            let hwnd = crate::platform::windows_layered::hwnd(&window);
+            if let Some(h) = hwnd {
+                crate::platform::windows_layered::make_layered(h);
+            }
+            let size = window.inner_size();
+            (
+                hwnd,
+                crate::platform::windows_layered::LayeredBitmap::new(
+                    size.width.max(1),
+                    size.height.max(1),
+                ),
+            )
+        };
+        #[cfg(not(target_os = "windows"))]
+        let surface = gpu
+            .create_surface(window.clone())
+            .ok_or("surface 创建失败")?;
+        #[cfg(target_os = "windows")]
+        let surface = gpu.create_surface(&window);
+
+        let idle = lib.find_idle().ok_or("缺少 idle 片段")?;
+        let mut anim = Anim::new(
+            &idle,
+            lib.first_frame(&idle).cloned().expect("idle 首帧缺失"),
+            lib.get_or_load(&idle, crate::clip_loader(&proxy)),
+        );
+        // 多开时随机起始相位，避免所有宠物同帧同步
+        if frame_offset > 0 && anim.is_loaded() {
+            anim.frame_idx = frame_offset % anim.frame_len().max(1);
+        }
+
+        let mut pet = Self {
+            window,
+            surface,
+            gpu,
+            #[cfg(target_os = "windows")]
+            hwnd,
+            #[cfg(target_os = "windows")]
+            bitmap,
+            mirror_scratch: vec![0u8; FRAME_BYTES],
+            anim,
+            lib,
+            proxy,
+            drag: None,
+            velocity: (0.0, 0.0),
+            last_drag_move: None,
+            last_tick_at: Instant::now(),
+            cursor_local: (0.0, 0.0),
+            cursor_phys: (0.0, 0.0),
+            ignoring_cursor: false,
+            last_press: None,
+            press_pos: (0.0, 0.0),
+            suppress_single: false,
+            walk_stride: 0.0,
+            walk_last_curve: 0.0,
+        };
+        pet.blit();
+        Ok(pet)
+    }
+
+    // ---------- 渲染 ----------
+
+    /// 当前帧上传纹理并请求重绘
+    fn blit(&mut self) {
+        let frame = self.anim.current_frame();
+        if self.anim.mirrored {
+            mirror_blit(&mut self.mirror_scratch, frame);
+            self.surface.upload(&self.gpu, &self.mirror_scratch);
+        } else {
+            self.surface.upload(&self.gpu, frame);
+        }
+        self.window.request_redraw();
+    }
+
+    pub fn render(&mut self) {
+        #[cfg(not(target_os = "windows"))]
+        let r = self.surface.render(&self.gpu);
+        #[cfg(target_os = "windows")]
+        let r = if let (Some(h), Some(b)) = (self.hwnd, self.bitmap.as_mut()) {
+            self.surface.render(&self.gpu, h, b)
+        } else {
+            log::error!("Windows 渲染上下文缺失（hwnd/bitmap）");
+            return;
+        };
+        if let Err(e) = r {
+            log::error!(
+                "渲染失败（{:?}）：{e:?}，尝试重建 surface",
+                self.window.id()
+            );
+            #[cfg(not(target_os = "windows"))]
+            if let Some(s) = self.gpu.create_surface(self.window.clone()) {
+                self.surface = s;
+                self.blit();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                self.surface = self.gpu.create_surface(&self.window);
+                self.blit();
+            }
+        }
+    }
+
+    fn resize_surface(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            // 保持物理尺寸为帧尺寸整数倍（同创建时的 snap）
+            let scale = self.window.scale_factor().max(1.0).round().max(1.0) as u32;
+            let phys =
+                winit::dpi::PhysicalSize::new((WIN_W as u32) * scale, (WIN_H as u32) * scale);
+            if self.window.inner_size() != phys {
+                let _ = self.window.request_inner_size(phys);
+            }
+        }
+        let size = self.window.inner_size();
+        self.surface
+            .resize(&self.gpu, size.width.max(1), size.height.max(1));
+        log::info!(
+            "窗口尺寸/缩放变化，surface 已重配为 {}×{}",
+            size.width,
+            size.height
+        );
+        #[cfg(target_os = "windows")]
+        {
+            self.bitmap = crate::platform::windows_layered::LayeredBitmap::new(
+                size.width.max(1),
+                size.height.max(1),
+            );
+        }
+    }
+
+    // ---------- 命中测试与点击穿透 ----------
+
+    fn hit_test(&self, lx: f64, ly: f64) -> bool {
+        if !(0.0..=WIN_W).contains(&lx) || !(0.0..=WIN_H).contains(&ly) {
+            return false;
+        }
+        let x = lx as usize;
+        let y = ly as usize;
+        // 镜像后显示像素来自源帧的水平翻转位置
+        let sx = if self.anim.mirrored {
+            FRAME_W as usize - 1 - x
+        } else {
+            x
+        };
+        self.anim.current_frame()[(y * FRAME_W as usize + sx) * 4 + 3] > HIT_ALPHA
+    }
+
+    /// 命中测试的光标位置：实时全局查询（`MouseInput` 不携带坐标）
+    fn hit_test_at_cursor(&mut self) -> bool {
+        if let Some((lx, ly)) = platform::global_mouse_local(&self.window) {
+            self.cursor_local = (lx, ly);
+        }
+        self.hit_test(self.cursor_local.0, self.cursor_local.1)
+    }
+
+    /// 全局轮询维护点击穿透（macOS；被忽略的窗口收不到事件，只能轮询恢复）
+    fn hit_poll(&mut self) {
+        if self.drag.is_some() {
+            return; // 拖拽中必须接收事件
+        }
+        if let Some((lx, ly)) = platform::global_mouse_local(&self.window)
+            && (0.0..=WIN_W).contains(&lx)
+            && (0.0..=WIN_H).contains(&ly)
+        {
+            self.cursor_local = (lx, ly);
+            let want_ignore = !self.hit_test(lx, ly);
+            if want_ignore != self.ignoring_cursor
+                && platform::set_ignore_cursor_events(&self.window, want_ignore)
+            {
+                self.ignoring_cursor = want_ignore;
+            }
+        }
+    }
+
+    // ---------- 窗口定位 ----------
+
+    fn window_pos_logical(&self) -> Option<(f64, f64)> {
+        let scale = self.window.scale_factor();
+        self.window.outer_position().ok().map(|p| {
+            let l: LogicalPosition<f64> = p.to_logical(scale);
+            (l.x, l.y)
+        })
+    }
+
+    fn monitor_size_logical(&self) -> Option<(f64, f64)> {
+        let mon = self
+            .window
+            .current_monitor()
+            .or_else(|| self.window.primary_monitor())?;
+        let scale = mon.scale_factor();
+        let s: LogicalSize<f64> = mon.size().to_logical(scale);
+        Some((s.width, s.height))
+    }
+
+    /// 相对位移（逻辑 px）；x 越界翻转行走方向，y 钳制在屏幕内
+    fn move_window_by(&mut self, dx: f64, dy: f64, flip_on_x: bool) {
+        let Some((mut x, mut y)) = self.window_pos_logical() else {
+            return;
+        };
+        x += dx;
+        y += dy;
+        if let Some((mw, mh)) = self.monitor_size_logical() {
+            let mut flipped = false;
+            if x < 2.0 {
+                x = 2.0;
+                flipped = true;
+            }
+            if x + WIN_W > mw - 2.0 {
+                x = (mw - WIN_W - 2.0).max(2.0);
+                flipped = true;
+            }
+            y = y.clamp(2.0, (mh - WIN_H - 2.0).max(2.0));
+            if flipped && flip_on_x {
+                if let Mode::Walk { dir, .. } = &mut self.anim.mode {
+                    *dir = dir.flip();
+                }
+                self.update_walk_mirror();
+            }
+        }
+        self.window.set_outer_position(LogicalPosition::new(x, y));
+    }
+
+    /// 朝右行走时镜像（`no_mirror` 名单除外）
+    fn update_walk_mirror(&mut self) {
+        if let Mode::Walk { dir, .. } = &self.anim.mode {
+            let name = self
+                .lib
+                .meta(&self.anim.clip)
+                .map(|m| m.name.to_string())
+                .unwrap_or_default();
+            self.anim.mirrored = *dir == WalkDir::Right && !self.lib.no_mirror(&name);
+        }
+    }
+
+    // ---------- 状态机驱动 ----------
+
+    /// 经帧库切换片段（含懒加载触发与首帧兜底）
+    fn switch_clip(&mut self, id: &ClipId, mode: Mode, mirrored: bool) {
+        let first = self.lib.first_frame(id).cloned().expect("首帧缓存缺失");
+        let frames = self.lib.get_or_load(id, crate::clip_loader(&self.proxy));
+        self.anim.set_clip(id, first, frames, mode, mirrored);
+    }
+
+    fn enter_idle(&mut self) {
+        if let Some(idle) = self.lib.find_idle() {
+            let idle = idle.clone();
+            let first = self.lib.first_frame(&idle).cloned().expect("idle 首帧缺失");
+            let frames = self.lib.get_or_load(&idle, crate::clip_loader(&self.proxy));
+            self.anim.enter_idle(&idle, first, frames);
+            self.blit();
+        }
+    }
+
+    fn play_oneshot_in(&mut self, category: &str) {
+        let clips = self.lib.clips_in_category(category);
+        if let Some(clip) = random_pick(&clips).cloned() {
+            self.switch_clip(&clip, Mode::OneShot, self.anim.mirrored);
+            self.blit();
+        }
+    }
+
+    /// Idle 态随机事件：40% 随机行走，60% 随机动画
+    fn fire_random_event(&mut self) {
+        let roll = crate::anim::rand_range(0.0, 1.0);
+        if roll < crate::anim::WALK_PROB {
+            let moves = self.lib.clips_in_category("move");
+            let with_stride: Vec<(ClipId, f64)> = moves
+                .into_iter()
+                .filter_map(|id| {
+                    let name = self.lib.meta(&id).map(|m| m.name.to_string())?;
+                    let (stride, _) = self.lib.move_strides.get(&name)?;
+                    Some((id, *stride))
+                })
+                .collect();
+            if let Some((clip, stride)) = random_pick(&with_stride).cloned() {
+                let dir = if crate::anim::rand_range(0.0, 1.0) < 0.5 {
+                    WalkDir::Left
+                } else {
+                    WalkDir::Right
+                };
+                let loops = 1 + (crate::anim::rand_u64() % 3) as u32;
+                self.switch_clip(
+                    &clip,
+                    Mode::Walk {
+                        dir,
+                        remaining_loops: loops,
+                    },
+                    false,
+                );
+                // 步幅：源坐标 640 宽 → 窗口逻辑坐标 320 宽（等比 0.5）
+                self.walk_stride = stride * 0.5;
+                self.walk_last_curve = 0.0;
+                self.update_walk_mirror();
+                self.blit();
+                return;
+            }
+        }
+        self.play_oneshot_in("random");
+    }
+
+    /// 行走单帧位移（按 24→15fps 重采样后的曲线差分）
+    fn walk_step(&mut self) {
+        let Mode::Walk { .. } = self.anim.mode else {
+            return;
+        };
+        let Some(name) = self.lib.meta(&self.anim.clip).map(|m| m.name.to_string()) else {
+            return;
+        };
+        let Some((_, curve)) = self.lib.move_strides.get(&name).cloned() else {
+            return;
+        };
+        let cur = curve_at(&curve, self.anim.frame_idx);
+        let mut delta = cur - self.walk_last_curve;
+        if delta < 0.0 {
+            delta += 1.0; // 回绕到新一圈
+        }
+        self.walk_last_curve = cur;
+        let Mode::Walk { dir, .. } = self.anim.mode else {
+            return;
+        };
+        let dx = delta * self.walk_stride * dir.sign();
+        self.move_window_by(dx, 0.0, true);
+    }
+
+    /// 拖拽松手后的惯性滑行（60Hz，与动画帧率解耦）
+    fn inertia_step(&mut self, now: Instant) {
+        let dt_ms = now.duration_since(self.last_tick_at).as_secs_f64() * 1000.0;
+        let dt_ms = dt_ms.min(50.0);
+        let (vx, vy) = self.velocity;
+        if vx.abs() < INERTIA_STOP && vy.abs() < INERTIA_STOP {
+            self.enter_idle();
+            return;
+        }
+        self.move_window_by(vx * dt_ms, vy * dt_ms, false);
+        let decay = INERTIA_DECAY_PER_MS.powf(dt_ms);
+        self.velocity = (vx * decay, vy * decay);
+    }
+
+    /// 主 tick（约 60Hz 调用）：随机事件、帧推进、惯性、穿透轮询
+    pub fn tick(&mut self, now: Instant) {
+        self.last_tick_at = now;
+
+        if matches!(self.anim.mode, Mode::Idle) && now >= self.anim.next_event_at {
+            self.fire_random_event();
+        }
+
+        let advanced = match self.anim.tick(now) {
+            Tick::Idle => false,
+            Tick::Advanced => true,
+            Tick::Finished => {
+                self.enter_idle();
+                true
+            }
+            Tick::WalkLoopDone => {
+                let mut done = false;
+                if let Mode::Walk {
+                    remaining_loops, ..
+                } = &mut self.anim.mode
+                {
+                    *remaining_loops = remaining_loops.saturating_sub(1);
+                    done = *remaining_loops == 0;
+                }
+                if done {
+                    self.enter_idle();
+                }
+                true
+            }
+        };
+        if advanced {
+            self.walk_step();
+            self.blit();
+        }
+
+        // 松手后惯性（mode 仍为 Drag 且无拖拽状态）
+        if matches!(self.anim.mode, Mode::Drag) && self.drag.is_none() {
+            self.inertia_step(now);
+        }
+
+        self.hit_poll();
+    }
+
+    // ---------- 交互事件 ----------
+
+    pub fn on_window_event(&mut self, event: &WindowEvent) -> Option<WindowRequest> {
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self.window.scale_factor();
+                let l: LogicalPosition<f64> = position.to_logical(scale);
+                self.cursor_phys = (position.x, position.y);
+                self.cursor_local = (l.x, l.y);
+                if let Some(drag) = &self.drag
+                    && let Some((wx, wy)) = self.window_pos_logical()
+                {
+                    // 保持 光标全局位置 - 窗口位置 = 抓取偏移：
+                    // 新窗口位置 = 当前窗口位置 + (本地坐标 - 抓取本地坐标)
+                    let new_pos = (wx + l.x - drag.offset.0, wy + l.y - drag.offset.1);
+                    // 速度 EMA（窗口位移 / 时间），松手作惯性初速
+                    if let Some((t, prev)) = self.last_drag_move {
+                        let dt = Instant::now().duration_since(t).as_secs_f64() * 1000.0;
+                        if dt >= 1.0 {
+                            let (ix, iy) = ((new_pos.0 - prev.0) / dt, (new_pos.1 - prev.1) / dt);
+                            self.velocity = (
+                                0.65 * ix + 0.35 * self.velocity.0,
+                                0.65 * iy + 0.35 * self.velocity.1,
+                            );
+                        }
+                    }
+                    self.last_drag_move = Some((Instant::now(), new_pos));
+                    self.window
+                        .set_outer_position(LogicalPosition::new(new_pos.0, new_pos.1));
+                }
+                None
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                let hit = self.hit_test_at_cursor();
+                log::debug!(
+                    "MouseInput Pressed {button:?} @ {:?} hit={hit}",
+                    self.cursor_local
+                );
+                if !hit {
+                    return None;
+                }
+                match button {
+                    MouseButton::Left => self.on_left_press(),
+                    // 物理坐标（菜单弹出示位置）
+                    MouseButton::Right => Some(WindowRequest::ShowMenu(
+                        self.cursor_phys.0 as i32,
+                        self.cursor_phys.1 as i32,
+                    )),
+                    _ => None,
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.on_left_release(),
+            WindowEvent::Focused(false) => {
+                // 失焦兜底：终止拖拽
+                if self.drag.take().is_some() {
+                    self.window.set_cursor(CursorIcon::Default);
+                    self.velocity = (0.0, 0.0);
+                    self.enter_idle();
+                }
+                None
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.resize_surface();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// 左键按下：双击多开判定，否则进入拖拽
+    fn on_left_press(&mut self) -> Option<WindowRequest> {
+        let now = Instant::now();
+        // 双击多开：时限内第二次按下
+        if let Some(t) = self.last_press
+            && now.duration_since(t).as_secs_f64() < DOUBLE_CLICK_SECS
+        {
+            self.last_press = None;
+            self.suppress_single = true;
+            let at = self.spawn_pos_near_cursor();
+            let _ = self.proxy.send_event(UserEvent::SpawnPet { at: Some(at) });
+            return None;
+        }
+        self.last_press = Some(now);
+        self.press_pos = self.cursor_local;
+        self.suppress_single = false;
+        self.begin_drag();
+        None
+    }
+
+    /// 左键松开：短按且未位移视为单击，否则交给惯性
+    fn on_left_release(&mut self) -> Option<WindowRequest> {
+        if self.drag.take().is_some() {
+            self.window.set_cursor(CursorIcon::Default);
+            let (dx, dy) = (
+                self.cursor_local.0 - self.press_pos.0,
+                self.cursor_local.1 - self.press_pos.1,
+            );
+            let moved = (dx * dx + dy * dy).sqrt();
+            let quick = self
+                .last_press
+                .is_some_and(|t| t.elapsed().as_secs_f64() < CLICK_SECS);
+            if !self.suppress_single && quick && moved < CLICK_MOVE_PX {
+                self.velocity = (0.0, 0.0); // 单击不走惯性
+                self.play_oneshot_in("click");
+            }
+            // 否则保持 Mode::Drag，velocity 驱动惯性；速度过小由 inertia_step 收尾回 Idle
+        }
+        self.suppress_single = false;
+        None
+    }
+
+    fn begin_drag(&mut self) {
+        // cursor_local 即 光标全局 - 窗口位置，直接作为抓取偏移
+        self.drag = Some(DragState {
+            offset: self.cursor_local,
+        });
+        self.velocity = (0.0, 0.0);
+        self.last_drag_move = None;
+        self.ignoring_cursor = false;
+        platform::set_ignore_cursor_events(&self.window, false);
+        self.window.set_cursor(CursorIcon::Grabbing);
+        if let Some(drag_clip) = random_pick(&self.lib.clips_in_category("drag")).cloned() {
+            self.switch_clip(&drag_clip, Mode::Drag, self.anim.mirrored);
+            self.blit();
+        }
+    }
+
+    /// 双击生成新宠物的落点：光标附近错开一点
+    fn spawn_pos_near_cursor(&self) -> (f64, f64) {
+        let base = self
+            .window_pos_logical()
+            .map(|(x, y)| (x + self.cursor_local.0, y + self.cursor_local.1));
+        match base {
+            Some((x, y)) => (x + 36.0, y + 36.0),
+            None => (240.0, 160.0),
+        }
+    }
+
+    /// 拖拽中或惯性滑行（事件循环据此提高唤醒频率）
+    pub fn is_interacting(&self) -> bool {
+        self.drag.is_some() || matches!(self.anim.mode, Mode::Drag)
+    }
+
+    pub fn id(&self) -> WindowId {
+        self.window.id()
+    }
+}
+
+/// 镜像 blit：逐行水平翻转（透明度随像素翻转，命中测试同步翻转采样）
+fn mirror_blit(dst: &mut [u8], src: &[u8]) {
+    const W: usize = FRAME_W as usize;
+    const H: usize = FRAME_H as usize;
+    for y in 0..H {
+        let row = y * W * 4;
+        for x in 0..W {
+            let s = row + x * 4;
+            let d = row + (W - 1 - x) * 4;
+            dst[d] = src[s];
+            dst[d + 1] = src[s + 1];
+            dst[d + 2] = src[s + 2];
+            dst[d + 3] = src[s + 3];
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::FRAME_BYTES;
+
+    #[test]
+    fn 镜像二次翻转复原() {
+        let src: Vec<u8> = (0..FRAME_BYTES).map(|i| (i % 251) as u8).collect();
+        let mut once = vec![0u8; FRAME_BYTES];
+        mirror_blit(&mut once, &src);
+        let mut twice = vec![0u8; FRAME_BYTES];
+        mirror_blit(&mut twice, &once);
+        assert_eq!(twice, src);
+    }
+
+    #[test]
+    fn 镜像交换同行首尾像素且保留alpha() {
+        let mut src = vec![0u8; FRAME_BYTES];
+        src[0..4].copy_from_slice(&[1, 2, 3, 200]);
+        // 第 0 行最后一列（不是整个缓冲区的末尾，那是最后一行的行尾）
+        let row0_last = (FRAME_W as usize - 1) * 4;
+        src[row0_last..row0_last + 4].copy_from_slice(&[5, 6, 7, 100]);
+        // 偶数宽没有不动列：列 159 的内容镜像后落到列 160
+        let col = 159;
+        src[col * 4..col * 4 + 4].copy_from_slice(&[9, 9, 9, 255]);
+        let mut dst = vec![0u8; FRAME_BYTES];
+        mirror_blit(&mut dst, &src);
+        assert_eq!(&dst[row0_last..row0_last + 4], &[1, 2, 3, 200]);
+        assert_eq!(&dst[0..4], &[5, 6, 7, 100]);
+        assert_eq!(&dst[(col + 1) * 4..(col + 1) * 4 + 4], &[9, 9, 9, 255]);
+    }
+}

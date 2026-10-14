@@ -1,0 +1,8 @@
+/target
+/assets/frames
+/assets/meta
+.DS_Store
+ds-pet.app/
+ds-pet-*.zip
+ds-pet-*.tar.gz
+package/

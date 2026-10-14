@@ -1,0 +1,252 @@
+//! 平台相关能力。
+//!
+//! macOS 点击穿透：`NSWindow.setIgnoresMouseEvents:`（winit 无此 API）；
+//! 窗口开启后收不到鼠标事件，恢复判定只能靠 `NSEvent.mouseLocation` 全局轮询。
+//! Windows：透明走 `WS_EX_LAYERED` + `UpdateLayeredWindow`（swapchain 路径无 per-pixel
+//! alpha），点击命中天然由位图 alpha 决定，无需轮询。Linux 未实现。
+
+// objc2 桥接层：裸指针来自 winit 窗口句柄，存活期由 winit 保证
+#![allow(unsafe_code)]
+
+use winit::window::Window;
+
+/// `AppKitWindowHandle` 暴露 `ns_view`，经 `NSView.window()` 取 `NSWindow`
+#[cfg(target_os = "macos")]
+fn ns_view_ptr(window: &Window) -> Option<*mut std::ffi::c_void> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::AppKit(kit) => Some(kit.ns_view.as_ptr()),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn with_ns_window<R>(window: &Window, f: impl FnOnce(&objc2_app_kit::NSWindow) -> R) -> Option<R> {
+    let view: *mut objc2_app_kit::NSView = ns_view_ptr(window)?.cast();
+    unsafe { (*view).window().map(|w| f(&w)) }
+}
+
+/// 设置窗口透明区域是否忽略鼠标事件（点击穿透）
+pub fn set_ignore_cursor_events(window: &Window, ignore: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        with_ns_window(window, |w| w.setIgnoresMouseEvents(ignore)).is_some()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // ULW 窗口命中测试由位图 alpha 决定，无需手动切换
+        let _ = (window, ignore);
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (window, ignore);
+        false
+    }
+}
+
+/// 全局鼠标位置换算到窗口本地坐标（逻辑点，左上原点）。
+/// 仅 macOS 需要（穿透切换后窗口收不到事件）；Windows ULW 命中由系统处理
+pub fn global_mouse_local(window: &Window) -> Option<(f64, f64)> {
+    #[cfg(target_os = "macos")]
+    {
+        with_ns_window(window, |w| {
+            let frame = w.frame(); // 屏幕坐标（左下原点，逻辑点）
+            let mouse = objc2_app_kit::NSEvent::mouseLocation();
+            let local_x = mouse.x - frame.origin.x;
+            let local_y_top = frame.size.height - (mouse.y - frame.origin.y);
+            (local_x, local_y_top)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+// ---------- Windows：分层窗口透明合成 ----------
+
+#[cfg(target_os = "windows")]
+pub mod windows_layered {
+    //! `WS_EX_LAYERED` + `UpdateLayeredWindow`：把预乘 BGRA 位图交给系统合成器，
+    //! 实现 swapchain 做不到的 per-pixel 透明；点击命中天然按位图 alpha。
+
+    use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE};
+    use windows::Win32::Graphics::Gdi::{
+        AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+        CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
+        HGDIOBJ, SelectObject,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, ULW_ALPHA, UpdateLayeredWindow,
+        WS_EX_LAYERED,
+    };
+
+    /// 取窗口 HWND
+    pub fn hwnd(window: &winit::window::Window) -> Option<HWND> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        match window.window_handle().ok().map(|h| h.as_raw()) {
+            Some(RawWindowHandle::Win32(k)) => Some(HWND(k.hwnd.get() as *mut _)),
+            _ => None,
+        }
+    }
+
+    /// 加 `WS_EX_LAYERED` 扩展样式（窗口创建后调用一次）
+    pub fn make_layered(hwnd: HWND) -> bool {
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
+            true
+        }
+    }
+
+    /// 复用的 DIB 位图（物理像素级，top-down 32bpp）
+    pub struct LayeredBitmap {
+        hdc: HDC,
+        hbmp: HBITMAP,
+        /// DIB 像素内存（BGRA，长度 = `w*h*4`），由 GDI 管理
+        pub pixels: *mut u8,
+        w: i32,
+        h: i32,
+    }
+
+    impl Drop for LayeredBitmap {
+        fn drop(&mut self) {
+            unsafe {
+                // 先取消选择再删除，避免 DC 持有悬空位图
+                SelectObject(self.hdc, HGDIOBJ::default());
+                let _ = DeleteObject(HGDIOBJ(self.hbmp.0));
+                let _ = DeleteDC(self.hdc);
+            }
+        }
+    }
+
+    impl LayeredBitmap {
+        pub fn new(w: u32, h: u32) -> Option<Self> {
+            if w == 0 || h == 0 {
+                return None;
+            }
+            unsafe {
+                let hdc = CreateCompatibleDC(None);
+                let info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w as i32,
+                        biHeight: -(h as i32), // 负值 = top-down（屏幕坐标一致）
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let mut pixels: *mut std::ffi::c_void = std::ptr::null_mut();
+                let hbmp = CreateDIBSection(
+                    Some(hdc),
+                    std::ptr::from_ref(&info),
+                    DIB_RGB_COLORS,
+                    std::ptr::from_mut(&mut pixels),
+                    None,
+                    0,
+                )
+                .ok()?;
+                if pixels.is_null() {
+                    return None;
+                }
+                let _ = SelectObject(hdc, HGDIOBJ(hbmp.0)); // 旧 stock bitmap 无需恢复
+                Some(Self {
+                    hdc,
+                    hbmp,
+                    pixels: pixels.cast::<u8>(),
+                    w: w as i32,
+                    h: h as i32,
+                })
+            }
+        }
+
+        /// 把回读的直通 alpha BGRA 预乘写入 DIB（ULW 要求 premultiplied）
+        pub fn write_premultiplied(&mut self, src: &[u8], w: u32, h: u32) -> bool {
+            if w as i32 != self.w || h as i32 != self.h || src.len() != (w * h * 4) as usize {
+                return false;
+            }
+            unsafe {
+                let dst = std::slice::from_raw_parts_mut(self.pixels, src.len());
+                dst.copy_from_slice(src);
+                let (chunks, _) = dst.as_chunks_mut::<4>();
+                for px in chunks {
+                    let a = u16::from(px[3]);
+                    px[0] = (u16::from(px[0]) * a / 255) as u8;
+                    px[1] = (u16::from(px[1]) * a / 255) as u8;
+                    px[2] = (u16::from(px[2]) * a / 255) as u8;
+                }
+            }
+            true
+        }
+
+        /// 提交给系统合成器（窗口内容整体替换；命中测试按位图 alpha）
+        pub fn present(&self, hwnd: HWND) -> bool {
+            unsafe {
+                let size = SIZE {
+                    cx: self.w,
+                    cy: self.h,
+                };
+                let src_pt = POINT { x: 0, y: 0 };
+                let blend = BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    BlendFlags: 0,
+                    SourceConstantAlpha: 255,
+                    AlphaFormat: AC_SRC_ALPHA as u8,
+                };
+                UpdateLayeredWindow(
+                    hwnd,
+                    None, // hdcDst
+                    None, // pptDst：窗口位置不变（由 winit 管理）
+                    Some(std::ptr::from_ref(&size)),
+                    Some(self.hdc),
+                    Some(std::ptr::from_ref(&src_pt)),
+                    COLORREF(0),
+                    Some(std::ptr::from_ref(&blend)),
+                    ULW_ALPHA,
+                )
+                .is_ok()
+            }
+        }
+    }
+}
+
+/// 在窗口内指定位置（物理像素，左上原点）弹出上下文菜单
+pub fn show_context_menu(menu: &muda::Menu, window: &Window, x: i32, y: i32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use muda::ContextMenu;
+        let pos = Some(muda::dpi::Position::Physical(
+            muda::dpi::PhysicalPosition::new(x, y),
+        ));
+        match ns_view_ptr(window) {
+            Some(view) => unsafe { menu.show_context_menu_for_nsview(view, pos) },
+            None => false,
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use muda::ContextMenu;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let pos = Some(muda::dpi::Position::Physical(
+            muda::dpi::PhysicalPosition::new(x, y),
+        ));
+        match window.window_handle().ok().map(|h| h.as_raw()) {
+            Some(RawWindowHandle::Win32(k)) => unsafe {
+                menu.show_context_menu_for_hwnd(k.hwnd.get(), pos)
+            },
+            _ => false,
+        }
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        // X11/Wayland 上下文菜单暂不启用（见 README 平台说明）
+        let _ = (menu, window, x, y);
+        false
+    }
+}

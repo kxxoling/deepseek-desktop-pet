@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# pre-push：与 CI 完全同款的检查集，push 前拦截一切 CI 会红的问题
+#   fmt / clippy（宿主 + Windows 交叉）/ test / deny / 覆盖率门槛
+# 注意：本地 stable 需保持较新（CI 用 floating stable，旧版 clippy 无新 lint）
+# 临时跳过：git push --no-verify
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# 读取并丢弃 stdin 推送的 ref 列表（本 hook 不区分分支）
+cat >/dev/null
+
+echo "[pre-push] fmt"
+cargo fmt --all --check
+
+echo "[pre-push] clippy（宿主）"
+cargo clippy --all-targets --quiet -- -D warnings
+
+if command -v zig >/dev/null 2>&1; then
+  echo "[pre-push] Windows 交叉 clippy"
+  export CC_x86_64_pc_windows_gnu="$PWD/scripts/zigcc-win-cross.sh"
+  export AR_x86_64_pc_windows_gnu="zig ar"
+  cargo clippy --quiet --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+else
+  echo "[pre-push] 跳过 Windows 交叉检查（未安装 zig：brew install zig）" >&2
+fi
+
+echo "[pre-push] test"
+cargo test --quiet
+
+if command -v cargo-deny >/dev/null 2>&1; then
+  echo "[pre-push] cargo-deny"
+  cargo deny check 2>&1 | tail -1
+else
+  echo "[pre-push] 跳过依赖审计（未安装 cargo-deny：brew install cargo-deny）" >&2
+fi
+
+if command -v cargo-llvm-cov >/dev/null 2>&1; then
+  echo "[pre-push] 覆盖率门槛（逻辑层 >= 95%）"
+  cargo llvm-cov --quiet --summary-only \
+    --ignore-filename-regex '(window|platform|render|main)\.rs' \
+    --fail-under-lines 95 >/dev/null
+else
+  echo "[pre-push] 跳过覆盖率检查（未安装 cargo-llvm-cov：brew install cargo-llvm-cov）" >&2
+fi
+
+echo "[pre-push] 通过 ✓"

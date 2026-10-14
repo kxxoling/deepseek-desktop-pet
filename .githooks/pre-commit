@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# pre-commit：格式 + 静态检查（与 CI 相同标准）
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "[pre-commit] cargo fmt --check"
+cargo fmt --all --check
+
+echo "[pre-commit] cargo clippy --all-targets -D warnings"
+cargo clippy --all-targets --quiet -- -D warnings
+
+echo "[pre-commit] 通过 ✓"
