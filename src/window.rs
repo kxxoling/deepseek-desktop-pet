@@ -359,43 +359,69 @@ impl PetWindow {
         }
     }
 
-    /// Idle 态随机事件：40% 随机行走，60% 随机动画
+    /// Idle 态随机事件：turn 穿插 / 行走 / 随机动画（决策见 `anim::plan_idle_event`）
     fn fire_random_event(&mut self) {
-        let roll = crate::anim::rand_range(0.0, 1.0);
-        if roll < crate::anim::WALK_PROB {
-            let moves = self.lib.clips_in_category("move");
-            let with_stride: Vec<(ClipId, f64)> = moves
-                .into_iter()
-                .filter_map(|id| {
-                    let name = self.lib.meta(&id).map(|m| m.name.to_string())?;
-                    let (stride, _) = self.lib.move_strides.get(&name)?;
-                    Some((id, *stride))
-                })
-                .collect();
-            if let Some((clip, stride)) = random_pick(&with_stride).cloned() {
-                let dir = if crate::anim::rand_range(0.0, 1.0) < 0.5 {
-                    WalkDir::Left
+        let snap = crate::anim::sched_snapshot(&self.lib);
+        let plan = crate::anim::plan_idle_event(
+            &snap,
+            crate::anim::rand_range(0.0, 1.0),
+            crate::anim::rand_range(0.0, 1.0),
+            crate::anim::rand_u64(),
+        );
+        self.exec_plan(plan);
+    }
+
+    /// 执行调度计划（决策在 anim.rs，剪辑切换副作用在本层）
+    fn exec_plan(&mut self, plan: crate::anim::Plan) {
+        use crate::anim::Plan;
+        match plan {
+            Plan::Idle => self.enter_idle(),
+            Plan::RandomClip => self.play_oneshot_in("random"),
+            Plan::Walk { loops } => self.start_walk(loops),
+            Plan::TurnThen(next) => {
+                // 仅当库里有 turn 片段才会生成 TurnThen；选取失败则直接执行后续
+                if let Some(clip) = random_pick(&self.lib.clips_in_category("turn")).cloned() {
+                    self.switch_clip(&clip, Mode::OneShot, self.anim.mirrored);
+                    self.anim.set_pending(*next);
+                    self.blit();
                 } else {
-                    WalkDir::Right
-                };
-                let loops = 1 + (crate::anim::rand_u64() % 3) as u32;
-                self.switch_clip(
-                    &clip,
-                    Mode::Walk {
-                        dir,
-                        remaining_loops: loops,
-                    },
-                    false,
-                );
-                // 步幅：源坐标 640 宽 → 窗口逻辑坐标 320 宽（等比 0.5）
-                self.walk_stride = stride * 0.5;
-                self.walk_last_curve = 0.0;
-                self.update_walk_mirror();
-                self.blit();
-                return;
+                    self.exec_plan(*next);
+                }
             }
         }
-        self.play_oneshot_in("random");
+    }
+
+    /// 进入行走（方向随机；步幅与镜像沿用既有逻辑）
+    fn start_walk(&mut self, loops: u32) {
+        let moves = self.lib.clips_in_category("move");
+        let with_stride: Vec<(ClipId, f64)> = moves
+            .into_iter()
+            .filter_map(|id| {
+                let name = self.lib.meta(&id).map(|m| m.name.to_string())?;
+                let (stride, _) = self.lib.move_strides.get(&name)?;
+                Some((id, *stride))
+            })
+            .collect();
+        if let Some((clip, stride)) = random_pick(&with_stride).cloned() {
+            let dir = if crate::anim::rand_range(0.0, 1.0) < 0.5 {
+                WalkDir::Left
+            } else {
+                WalkDir::Right
+            };
+            self.switch_clip(
+                &clip,
+                Mode::Walk {
+                    dir,
+                    remaining_loops: loops,
+                },
+                false,
+            );
+            // 步幅：源坐标 640 宽 → 窗口逻辑坐标 320 宽（等比 0.5）
+            self.walk_stride = stride * 0.5;
+            self.walk_last_curve = 0.0;
+            self.update_walk_mirror();
+            self.blit();
+        }
     }
 
     /// 行走单帧位移（按 24→15fps 重采样后的曲线差分）
@@ -448,7 +474,12 @@ impl PetWindow {
             Tick::Idle => false,
             Tick::Advanced => true,
             Tick::Finished => {
-                self.enter_idle();
+                // 播完有后续计划则执行，否则回 Idle
+                if let Some(next) = self.anim.take_pending() {
+                    self.exec_plan(next);
+                } else {
+                    self.enter_idle();
+                }
                 true
             }
             Tick::WalkLoopDone => {
@@ -461,7 +492,9 @@ impl PetWindow {
                     done = *remaining_loops == 0;
                 }
                 if done {
-                    self.enter_idle();
+                    // 走完先转身再回 Idle
+                    let snap = crate::anim::sched_snapshot(&self.lib);
+                    self.exec_plan(crate::anim::plan_walk_end(&snap));
                 }
                 true
             }
