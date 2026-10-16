@@ -11,6 +11,7 @@
 mod anim;
 mod assets;
 mod config;
+mod input;
 mod library;
 mod logging;
 mod platform;
@@ -59,36 +60,132 @@ const POLL_TICK: Duration = Duration::from_millis(33);
 /// 高频唤醒：拖拽 / 惯性滑行期间（60Hz）
 const FAST_TICK: Duration = Duration::from_millis(16);
 
-/// 经帧库懒加载，加载完成转发为事件循环事件
 /// 菜单项 ID
 const MENU_NEW: &str = "app.new";
 const MENU_CLOSE: &str = "pet.close";
 const MENU_LOGS: &str = "app.openlogs";
 const MENU_EXIT: &str = "app.exit";
 
+/// 菜单项定义（纯数据表，加菜单项就是往表里加一行）；muda 菜单构建必须在主线程
+#[allow(dead_code)]
+enum MenuItemDef {
+    /// 普通项
+    Item {
+        id: &'static str,
+        label: &'static str,
+    },
+    /// 勾选项（设置开关用）
+    Check {
+        id: &'static str,
+        label: &'static str,
+        checked: bool,
+    },
+    /// 子菜单（树）
+    Submenu {
+        label: &'static str,
+        children: &'static [MenuItemDef],
+    },
+}
+
+/// 右键菜单注册表
+const CONTEXT_MENU: &[MenuItemDef] = &[
+    MenuItemDef::Item {
+        id: MENU_NEW,
+        label: "新增一只",
+    },
+    MenuItemDef::Item {
+        id: MENU_CLOSE,
+        label: "关闭这只",
+    },
+    MenuItemDef::Item {
+        id: MENU_LOGS,
+        label: "打开日志文件夹",
+    },
+    MenuItemDef::Item {
+        id: MENU_EXIT,
+        label: "退出",
+    },
+];
+
+/// 托盘菜单注册表（无「关闭这只」：托盘不指向具体窗口）
+const TRAY_MENU: &[MenuItemDef] = &[
+    MenuItemDef::Item {
+        id: MENU_NEW,
+        label: "新增一只",
+    },
+    MenuItemDef::Item {
+        id: MENU_LOGS,
+        label: "打开日志文件夹",
+    },
+    MenuItemDef::Item {
+        id: MENU_EXIT,
+        label: "退出",
+    },
+];
+
 fn menu_item(id: &str, label: &str) -> muda::MenuItem {
     muda::MenuItem::with_id(muda::MenuId::new(id), label, true, None)
 }
 
-fn build_context_menu() -> muda::Result<muda::Menu> {
+/// Menu 与 Submenu 的 append 收口，递归构建子菜单用
+trait AppendItem {
+    fn append_item(&self, item: &dyn muda::IsMenuItem) -> muda::Result<()>;
+}
+
+impl AppendItem for muda::Menu {
+    fn append_item(&self, item: &dyn muda::IsMenuItem) -> muda::Result<()> {
+        self.append(item)
+    }
+}
+
+impl AppendItem for muda::Submenu {
+    fn append_item(&self, item: &dyn muda::IsMenuItem) -> muda::Result<()> {
+        self.append(item)
+    }
+}
+
+/// 按注册表递归构建菜单
+fn append_defs(menu: &impl AppendItem, defs: &[MenuItemDef]) -> muda::Result<()> {
+    for def in defs {
+        match def {
+            MenuItemDef::Item { id, label } => {
+                menu.append_item(&menu_item(id, label))?;
+            }
+            MenuItemDef::Check { id, label, checked } => {
+                menu.append_item(&muda::CheckMenuItem::with_id(
+                    muda::MenuId::new(*id),
+                    label,
+                    *checked,
+                    true,
+                    None,
+                ))?;
+            }
+            MenuItemDef::Submenu { label, children } => {
+                let sub = muda::Submenu::with_id(
+                    muda::MenuId::new(format!("submenu.{label}")),
+                    label,
+                    true,
+                );
+                append_defs(&sub, children)?;
+                menu.append_item(&sub)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_menu(defs: &[MenuItemDef]) -> muda::Result<muda::Menu> {
     let menu = muda::Menu::new();
-    menu.append_items(&[
-        &menu_item(MENU_NEW, "新增一只"),
-        &menu_item(MENU_CLOSE, "关闭这只"),
-        &menu_item(MENU_LOGS, "打开日志文件夹"),
-        &menu_item(MENU_EXIT, "退出"),
-    ])?;
+    append_defs(&menu, defs)?;
     Ok(menu)
 }
 
+fn build_context_menu() -> muda::Result<muda::Menu> {
+    build_menu(CONTEXT_MENU)
+}
+
 fn build_tray_menu() -> muda::Result<muda::Menu> {
-    let menu = muda::Menu::new();
-    menu.append_items(&[
-        &menu_item(MENU_NEW, "新增一只"),
-        &menu_item(MENU_LOGS, "打开日志文件夹"),
-        &menu_item(MENU_EXIT, "退出"),
-    ])?;
-    Ok(menu)
+    build_menu(TRAY_MENU)
 }
 
 fn build_tray(
@@ -390,6 +487,68 @@ fn main() {
 #[allow(unsafe_code)] // 测试内修改进程环境变量（edition 2024 要求 unsafe 块）
 mod tests {
     use super::*;
+
+    /// 深度收集注册表里的全部菜单项 id（含子菜单）
+    fn collect_ids(defs: &[MenuItemDef], ids: &mut Vec<&'static str>) {
+        for def in defs {
+            match def {
+                MenuItemDef::Item { id, .. } | MenuItemDef::Check { id, .. } => ids.push(id),
+                MenuItemDef::Submenu { children, .. } => collect_ids(children, ids),
+            }
+        }
+    }
+
+    #[test]
+    fn menu_ids_unique_and_nonempty() {
+        for defs in [CONTEXT_MENU, TRAY_MENU] {
+            let mut ids = Vec::new();
+            collect_ids(defs, &mut ids);
+            assert_ne!(ids, [] as [&'static str; 0]);
+            assert!(ids.iter().all(|i| !i.is_empty()), "id 不能为空：{ids:?}");
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            let before = sorted.len();
+            sorted.dedup();
+            assert_eq!(sorted.len(), before, "表内 id 必须唯一：{ids:?}");
+        }
+    }
+
+    #[test]
+    fn menus_match_previous_structure() {
+        let mut ctx = Vec::new();
+        collect_ids(CONTEXT_MENU, &mut ctx);
+        let mut tray = Vec::new();
+        collect_ids(TRAY_MENU, &mut tray);
+        // 右键四项、托盘三项；「关闭这只」只在右键
+        assert_eq!(ctx.len(), 4);
+        assert_eq!(tray.len(), 3);
+        assert!(ctx.contains(&MENU_CLOSE));
+        assert!(!tray.contains(&MENU_CLOSE));
+        for id in [MENU_NEW, MENU_LOGS, MENU_EXIT] {
+            assert!(ctx.contains(&id) && tray.contains(&id), "公共项缺失：{id}");
+        }
+    }
+
+    #[test]
+    fn submenu_and_check_defs_traversable() {
+        const NESTED: &[MenuItemDef] = &[MenuItemDef::Submenu {
+            label: "设置",
+            children: &[
+                MenuItemDef::Check {
+                    id: "app.check",
+                    label: "开关",
+                    checked: true,
+                },
+                MenuItemDef::Item {
+                    id: "app.sub",
+                    label: "子项",
+                },
+            ],
+        }];
+        let mut ids = Vec::new();
+        collect_ids(NESTED, &mut ids);
+        assert_eq!(ids, vec!["app.check", "app.sub"]);
+    }
 
     #[test]
     fn 构建标识包含版本与哈希() {
