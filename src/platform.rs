@@ -21,6 +21,33 @@ fn ns_view_ptr(window: &Window) -> Option<*mut std::ffi::c_void> {
     }
 }
 
+/// 弹出菜单的常驻宿主窗口（1×1 透明 borderless，仅主线程使用）。
+/// 以裸指针常驻：`Retained` 非 Sync，且窗口生命周期与进程相同，无需释放
+#[cfg(target_os = "macos")]
+fn popup_host(mtm: objc2_foundation::MainThreadMarker) -> &'static objc2_app_kit::NSWindow {
+    use std::sync::OnceLock;
+    static HOST: OnceLock<usize> = OnceLock::new();
+    let &ptr = HOST.get_or_init(|| {
+        use objc2_app_kit::{NSBackingStoreType, NSColor, NSWindow, NSWindowStyleMask};
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
+        let host = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                mtm.alloc(),
+                rect,
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        host.setOpaque(false);
+        host.setBackgroundColor(Some(&NSColor::clearColor()));
+        let leaked = Box::leak(Box::new(host));
+        std::ptr::from_ref(&**leaked) as usize
+    });
+    unsafe { &*(ptr as *const objc2_app_kit::NSWindow) }
+}
+
 #[cfg(target_os = "macos")]
 fn with_ns_window<R>(window: &Window, f: impl FnOnce(&objc2_app_kit::NSWindow) -> R) -> Option<R> {
     let view: *mut objc2_app_kit::NSView = ns_view_ptr(window)?.cast();
@@ -220,14 +247,16 @@ pub mod windows_layered {
 pub fn show_context_menu(menu: &muda::Menu, window: &Window, x: i32, y: i32) -> bool {
     #[cfg(target_os = "macos")]
     {
-        use objc2_app_kit::{NSBackingStoreType, NSColor, NSWindow, NSWindowStyleMask};
-        use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+        use objc2_foundation::MainThreadMarker;
 
         // 直接在 winit 宠物窗口的 view 上 popUp 会丢带子菜单的行（macOS 26 实测），
-        // 换一个临时原生小窗口承载弹出，位置放在点击点，弹出结束即关闭
+        // 换一个原生小窗口承载弹出。窗口常驻复用：反复创建并关闭承载窗口会偶发
+        // AppKit 在渲染提交时过度释放窗口动画对象导致崩溃，弹出后只隐藏不关闭
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
+        let host = popup_host(mtm);
+
         let scale = window.scale_factor();
         let Some(monitor) = window.current_monitor() else {
             return false;
@@ -237,19 +266,9 @@ pub fn show_context_menu(menu: &muda::Menu, window: &Window, x: i32, y: i32) -> 
         let px = f64::from(ox + x) / scale;
         let py = screen_h - f64::from(oy + y) / scale - 1.0;
 
-        let helper = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                mtm.alloc(),
-                NSRect::new(NSPoint::new(px, py), NSSize::new(1.0, 1.0)),
-                NSWindowStyleMask::Borderless,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        helper.setOpaque(false);
-        helper.setBackgroundColor(Some(&NSColor::clearColor()));
-        helper.orderFrontRegardless();
-        let view = helper.contentView().expect("临时窗口无 contentView");
+        host.setFrameOrigin(objc2_foundation::NSPoint::new(px, py));
+        host.orderFrontRegardless();
+        let view = host.contentView().expect("弹出宿主窗口无 contentView");
         let shown = {
             use muda::ContextMenu;
             let ptr: *const std::ffi::c_void = std::ptr::from_ref(&*view).cast();
@@ -262,7 +281,7 @@ pub fn show_context_menu(menu: &muda::Menu, window: &Window, x: i32, y: i32) -> 
                 )
             }
         };
-        helper.close();
+        host.orderOut(None);
         shown
     }
     #[cfg(target_os = "windows")]
