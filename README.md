@@ -23,7 +23,8 @@ cargo run --release
 预处理依赖 `ffmpeg` 与 `zstd`，可重复执行（跳过已完成片段）。
 
 调试环境变量：`DS_PET_POS=x,y`（首窗位置）、`DS_ALPHA`（`post`/`pre`/`auto`）、
-`DS_PET_ASSETS`（资产目录）、`DS_PET_LOG_DIR`（日志目录）、`RUST_LOG`。
+`DS_PET_ASSETS`（资产目录）、`DS_PET_LOG_DIR`（日志目录）、
+`DS_PET_CONFIG`（配置文件路径）、`RUST_LOG`。
 
 ## 平台支持
 

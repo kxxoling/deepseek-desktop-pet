@@ -10,6 +10,7 @@
 
 mod anim;
 mod assets;
+mod config;
 mod library;
 mod logging;
 mod platform;
@@ -313,6 +314,8 @@ fn main() {
         Some(path) => log::info!("日志文件：{}", path.display()),
         None => eprintln!("日志初始化失败，仅输出到 stderr"),
     }
+    // 启动时就加载配置，坏文件尽早暴露
+    log::info!("配置文件：{}", config::init().display());
 
     let root = assets::locate_assets_root();
     let lib = match Library::load(&root) {
