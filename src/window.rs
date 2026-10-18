@@ -713,6 +713,24 @@ impl PetWindow {
         self.drag.is_some() || matches!(self.anim.mode, Mode::Drag)
     }
 
+    /// 角色切换：替换 `Library` 引用并回到 Idle（旧库的懒加载缓存随引用一起释放）
+    pub fn switch_library(&mut self, lib: Arc<Library>) {
+        self.lib = lib;
+        if let Some(idle) = self.lib.find_idle() {
+            let first = self.lib.first_frame(&idle).cloned().expect("idle 首帧缺失");
+            let frames = self.lib.get_or_load(&idle, crate::clip_loader(&self.proxy));
+            self.anim.enter_idle(&idle, first, frames);
+        }
+        self.anim.set_event_clips(
+            self.lib
+                .clips_in_category("events")
+                .into_iter()
+                .filter_map(|id| self.lib.first_frame(&id).cloned().map(|f| (id, f)))
+                .collect(),
+        );
+        self.blit();
+    }
+
     pub fn id(&self) -> WindowId {
         self.window.id()
     }
