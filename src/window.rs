@@ -126,6 +126,13 @@ impl PetWindow {
             lib.first_frame(&idle).cloned().expect("idle 首帧缺失"),
             lib.get_or_load(&idle, crate::clip_loader(&proxy)),
         );
+        // trigger_clip 的候选片段池：events 类全部片段，首帧直接共享库缓存
+        anim.set_event_clips(
+            lib.clips_in_category("events")
+                .into_iter()
+                .filter_map(|id| lib.first_frame(&id).cloned().map(|f| (id, f)))
+                .collect(),
+        );
         // 多开时随机起始相位，避免所有宠物同帧同步
         if frame_offset > 0 && anim.is_loaded() {
             anim.frame_idx = frame_offset % anim.frame_len().max(1);
@@ -466,6 +473,14 @@ impl PetWindow {
     pub fn tick(&mut self, now: Instant) {
         self.last_tick_at = now;
 
+        // trigger_clip 自己切换片段时没法顺带启动加载（加载通道在窗口层），
+        // 这里每帧检查排队中的片段并补上；重复调用是安全的
+        if let Some(id) = self.anim.queued_clip()
+            && let Some(frames) = self.lib.get_or_load(&id, crate::clip_loader(&self.proxy))
+        {
+            self.anim.on_clip_loaded(&id, frames);
+        }
+
         if matches!(self.anim.mode, Mode::Idle) && now >= self.anim.next_event_at {
             self.fire_random_event();
         }
@@ -492,9 +507,15 @@ impl PetWindow {
                     done = *remaining_loops == 0;
                 }
                 if done {
-                    // 走完先转身再回 Idle
-                    let snap = crate::anim::sched_snapshot(&self.lib);
-                    self.exec_plan(crate::anim::plan_walk_end(&snap));
+                    // 行走途中受理的触发先于走完后的自动转身播放
+                    if let Some(id) = self.anim.take_pending_trigger() {
+                        self.switch_clip(&id, Mode::OneShot, self.anim.mirrored);
+                        self.blit();
+                    } else {
+                        // 走完这一圈后先播转身动画，再回到待机
+                        let snap = crate::anim::sched_snapshot(&self.lib);
+                        self.exec_plan(crate::anim::plan_walk_end(&snap));
+                    }
                 }
                 true
             }

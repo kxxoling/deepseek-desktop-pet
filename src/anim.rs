@@ -4,6 +4,8 @@
 //! - OneShot：单次片段播完回 Idle（可携带后续计划）
 //! - Drag：drag 片段循环（拖拽中与松手惯性）
 //! - Walk：move 片段循环，窗口按步幅曲线位移（速度 = stride/圈时长，步态不打滑）
+//!
+//! events 类片段不参与自主调度，需要时通过 [`Anim::trigger_clip`] 触发播放。
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -103,6 +105,10 @@ pub struct Anim {
     queued: Option<ClipId>,
     /// 单次片段播完后的后续计划；切片段即作废
     pending: Option<Plan>,
+    /// `trigger_clip` 的候选片段池，首帧直接共享库里的缓存
+    event_clips: Vec<(ClipId, Arc<Frame>)>,
+    /// 行走途中受理的触发片段，等当前这圈走完再播放；一旦切换片段就作废
+    pending_trigger: Option<ClipId>,
 }
 
 pub fn random_pick<T>(v: &[T]) -> Option<&T> {
@@ -206,6 +212,8 @@ impl Anim {
                 )),
             queued: None,
             pending: None,
+            event_clips: Vec::new(),
+            pending_trigger: None,
         }
     }
 
@@ -226,8 +234,9 @@ impl Anim {
         self.mode = mode;
         self.mirrored = mirrored;
         self.next_frame_at = Some(Instant::now() + crate::library::FRAME_DUR);
-        // 任何剪辑切换都意味着旧的 turn 后续计划被打断
+        // 任何剪辑切换都使既有的后续计划与待播触发作废
         self.pending = None;
+        self.pending_trigger = None;
     }
 
     /// 设置单次片段播完后的去向
@@ -271,6 +280,54 @@ impl Anim {
         }
     }
 
+    /// 注入候选片段池；首帧直接共享库里的缓存
+    pub fn set_event_clips(&mut self, clips: Vec<(ClipId, Arc<Frame>)>) {
+        self.event_clips = clips;
+    }
+
+    /// 按 spec 前缀筛选候选片段，spec 为类名或「类/子分类」
+    #[allow(dead_code)]
+    fn pick_event_clip(&self, spec: &str) -> Option<&(ClipId, Arc<Frame>)> {
+        let prefix = format!("{spec}/");
+        let cands: Vec<_> = self
+            .event_clips
+            .iter()
+            .filter(|(id, _)| id.0.starts_with(&prefix))
+            .collect();
+        random_pick(&cands).copied()
+    }
+
+    /// 触发播放一个 events 类片段，这是其他功能点播动画的标准入口：只调用
+    /// 这个接口，不要直接改动画状态机的内部。spec 为类名或「类/子分类」，
+    /// 在候选池内随机选一个。
+    ///
+    /// 受理规则：待机或播放单次片段时立即切换；行走中则等当前这圈走完；
+    /// 拖拽中直接拒绝并返回 false。没有匹配的候选时同样返回 false。
+    #[allow(dead_code)]
+    pub fn trigger_clip(&mut self, spec: &str) -> bool {
+        let Some((id, first)) = self.pick_event_clip(spec).cloned() else {
+            return false;
+        };
+        if matches!(self.mode, Mode::Drag) {
+            return false;
+        }
+        if let Mode::Walk {
+            remaining_loops, ..
+        } = &mut self.mode
+        {
+            *remaining_loops = 1; // 剩余圈数改为 1：走完脚下这一圈就结束行走，随后播放触发的片段
+            self.pending_trigger = Some(id);
+        } else {
+            self.set_clip(&id, first, None, Mode::OneShot, self.mirrored);
+        }
+        true
+    }
+
+    /// 取走行走结束后待播的触发片段；只有第一次能取到
+    pub fn take_pending_trigger(&mut self) -> Option<ClipId> {
+        self.pending_trigger.take()
+    }
+
     /// 当前应显示的帧（未加载完成时为首帧兜底）
     pub fn current_frame(&self) -> &[u8] {
         match &self.frames {
@@ -290,6 +347,11 @@ impl Anim {
 
     pub fn is_loaded(&self) -> bool {
         self.frames.is_some()
+    }
+
+    /// 加载排队中的 clip，window 据此补懒加载
+    pub fn queued_clip(&self) -> Option<ClipId> {
+        self.queued.clone()
     }
 
     /// 帧推进。返回 `WalkLoopDone` 时调用方负责行走位移与圈数递减。
@@ -597,7 +659,6 @@ mod extra_tests {
         }
     }
 }
-
 #[cfg(test)]
 mod sched_tests {
     use super::*;
@@ -807,5 +868,164 @@ mod sched_tests {
         a.set_pending(Plan::Walk { loops: 1 });
         a.enter_idle(&clip("idle/x"), first_frame(), Some(frames_n(1)));
         assert_eq!(a.take_pending(), None);
+    }
+}
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::*;
+
+    fn frames_n(n: usize) -> Arc<ClipFrames> {
+        Arc::new(ClipFrames::from_flat(vec![
+            7u8;
+            n * crate::library::FRAME_BYTES
+        ]))
+    }
+
+    fn first_frame(fill: u8) -> Arc<Frame> {
+        Arc::new(Frame(vec![fill; crate::library::FRAME_BYTES]))
+    }
+
+    fn clip(id: &str) -> ClipId {
+        ClipId(Arc::from(id))
+    }
+
+    /// 候选池：balance 子类两条，其他子类一条
+    fn events_pool() -> Vec<(ClipId, Arc<Frame>)> {
+        vec![
+            (clip("events/balance/没钱了"), first_frame(1)),
+            (clip("events/balance/发工资"), first_frame(2)),
+            (clip("events/喝水"), first_frame(3)),
+        ]
+    }
+
+    fn anim_with_events(mode: Mode) -> Anim {
+        let mut a = Anim::new(&clip("idle/x"), first_frame(9), Some(frames_n(1)));
+        a.set_event_clips(events_pool());
+        if !matches!(mode, Mode::Idle) {
+            let id = match &mode {
+                Mode::Walk { .. } => "move/走",
+                Mode::Drag => "drag/抓",
+                Mode::OneShot => "random/笑",
+                Mode::Idle => unreachable!(),
+            };
+            a.set_clip(&clip(id), first_frame(9), Some(frames_n(1)), mode, false);
+        }
+        a
+    }
+
+    #[test]
+    fn acceptance_matrix() {
+        // 待机时立即受理：切到单次播放，帧集排队加载，先显示选中的首帧
+        let mut a = anim_with_events(Mode::Idle);
+        assert!(a.trigger_clip("events"));
+        assert!(matches!(a.mode, Mode::OneShot));
+        assert!(a.clip.0.starts_with("events/"));
+        assert!(!a.is_loaded()); // 没有预加载，排队等窗口层补上
+        assert_eq!(a.queued_clip(), Some(a.clip.clone())); // 排队的正是触发片段
+        assert!(matches!(a.current_frame()[0], 1..=3)); // 先显示选中的首帧
+        // 播放单次片段时再次触发：受理并替换当前片段
+        assert!(a.trigger_clip("events/balance"));
+        assert!(a.clip.0.starts_with("events/balance/"));
+        // 拖拽中：拒绝，状态保持不变
+        let mut d = anim_with_events(Mode::Drag);
+        let before = d.clip.clone();
+        assert!(!d.trigger_clip("events"));
+        assert_eq!(d.clip, before);
+        assert!(matches!(d.mode, Mode::Drag));
+        // 类名没有匹配或池为空：拒绝
+        let mut a2 = anim_with_events(Mode::Idle);
+        assert!(!a2.trigger_clip("nonexistent"));
+        let mut a3 = Anim::new(&clip("idle/x"), first_frame(9), Some(frames_n(1)));
+        assert!(!a3.trigger_clip("events")); // 没有注入候选池
+    }
+
+    #[test]
+    fn walk_trigger_plays_after_current_loop() {
+        let mut a = anim_with_events(Mode::Walk {
+            dir: WalkDir::Right,
+            remaining_loops: 3,
+        });
+        assert!(a.trigger_clip("events"));
+        // 剩余圈数改为 1：走完脚下这一圈就结束行走
+        assert!(matches!(
+            &a.mode,
+            Mode::Walk {
+                remaining_loops: 1,
+                ..
+            }
+        ));
+        assert!(a.is_loaded()); // 未切片段，仍播放当前 walk 帧
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR),
+            Tick::WalkLoopDone
+        ));
+        // 走完后的取片段与切换归窗口层，这里模拟它的动作
+        let id = a.take_pending_trigger().expect("应有待播触发");
+        assert!(id.0.starts_with("events/"));
+        assert_eq!(a.take_pending_trigger(), None); // 一次性
+        a.set_clip(&id, first_frame(1), None, Mode::OneShot, false);
+        assert!(matches!(a.mode, Mode::OneShot));
+    }
+
+    #[test]
+    fn subcategory_and_category_random() {
+        // 指定子分类时，只会在 balance 的两条里选
+        for _ in 0..30 {
+            let mut a = anim_with_events(Mode::Idle);
+            assert!(a.trigger_clip("events/balance"));
+            assert!(
+                a.clip == clip("events/balance/没钱了") || a.clip == clip("events/balance/发工资")
+            );
+        }
+        // 指定整类时，三条都可能选中
+        for _ in 0..30 {
+            let mut a = anim_with_events(Mode::Idle);
+            assert!(a.trigger_clip("events"));
+            assert!(a.clip.0.starts_with("events/"));
+        }
+        // 只有一个候选时，命中的必然是它
+        let mut a = anim_with_events(Mode::Idle);
+        a.set_event_clips(vec![(clip("events/balance/没钱了"), first_frame(1))]);
+        assert!(a.trigger_clip("events/balance"));
+        assert_eq!(a.clip, clip("events/balance/没钱了"));
+        // 前缀必须对准目录层级，events/balancex 不会误命中 balance
+        let mut b = anim_with_events(Mode::Idle);
+        assert!(!b.trigger_clip("events/balancex")); // 前缀必须按目录段匹配
+    }
+
+    #[test]
+    fn triggered_clip_returns_to_idle() {
+        let mut a = anim_with_events(Mode::Idle);
+        a.set_event_clips(vec![(clip("events/喝水"), first_frame(3))]);
+        assert!(a.trigger_clip("events"));
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR),
+            Tick::Finished
+        ));
+        a.enter_idle(&clip("idle/x"), first_frame(9), Some(frames_n(1)));
+        assert!(matches!(a.mode, Mode::Idle));
+    }
+
+    #[test]
+    fn clip_switch_cancels_pending_trigger() {
+        let mut a = anim_with_events(Mode::Walk {
+            dir: WalkDir::Left,
+            remaining_loops: 2,
+        });
+        assert!(a.trigger_clip("events"));
+        // 拖拽打断后，待播的触发片段作废
+        a.set_clip(
+            &clip("drag/抓"),
+            first_frame(9),
+            Some(frames_n(1)),
+            Mode::Drag,
+            false,
+        );
+        assert_eq!(a.take_pending_trigger(), None);
     }
 }
