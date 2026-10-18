@@ -43,6 +43,10 @@ pub struct PetWindow {
     bitmap: Option<crate::platform::windows_layered::LayeredBitmap>,
     /// 镜像帧的临时翻转缓冲（避免每帧分配）
     mirror_scratch: Vec<u8>,
+    /// Q 弹变形的输出缓冲
+    squash_scratch: Vec<u8>,
+    /// 点击 Q 弹起始时刻
+    squash_start: Option<Instant>,
     pub anim: Anim,
     lib: Arc<Library>,
     proxy: EventLoopProxy<UserEvent>,
@@ -170,6 +174,8 @@ impl PetWindow {
             #[cfg(target_os = "windows")]
             bitmap,
             mirror_scratch: vec![0u8; FRAME_BYTES],
+            squash_scratch: vec![0u8; FRAME_BYTES],
+            squash_start: None,
             anim,
             lib,
             proxy,
@@ -206,10 +212,25 @@ impl PetWindow {
         let frame = self.anim.current_frame();
         if self.anim.mirrored {
             mirror_blit(&mut self.mirror_scratch, frame);
-            self.surface.upload(&self.gpu, &self.mirror_scratch);
-        } else {
-            self.surface.upload(&self.gpu, frame);
         }
+        let src: &[u8] = if self.anim.mirrored {
+            &self.mirror_scratch
+        } else {
+            frame
+        };
+        // 点击 Q 弹期间按当前比例把整帧纵向压缩（身体压向画面底部），结束后自动恢复
+        if let Some(t0) = self.squash_start {
+            let t = t0.elapsed().as_secs_f64() * 1000.0;
+            let scale = crate::render::squash_scale(t);
+            if scale < 1.0 {
+                squash_into(&mut self.squash_scratch, src, scale);
+                self.surface.upload(&self.gpu, &self.squash_scratch);
+                self.window.request_redraw();
+                return;
+            }
+            self.squash_start = None;
+        }
+        self.surface.upload(&self.gpu, src);
         self.window.request_redraw();
     }
 
@@ -804,6 +825,24 @@ impl PetWindow {
             (WIN_W, WIN_H),
         );
         self.window.set_outer_position(LogicalPosition::new(gx, gy));
+    }
+}
+
+/// 纵向压缩 blit：把整帧压向画面底部（宠物贴地），顶部腾出的行保持透明
+fn squash_into(dst: &mut [u8], src: &[u8], scale: f64) {
+    const W: usize = FRAME_W as usize;
+    const H: usize = FRAME_H as usize;
+    let hs = (H as f64 * scale) as usize;
+    for y in 0..H {
+        let row = y * W * 4;
+        if y + hs < H {
+            // 压缩后顶部腾出的行保持透明
+            dst[row..row + W * 4].fill(0);
+        } else {
+            let sy = (((y + hs - H) as f64 / scale) as usize).min(H - 1);
+            let srow = sy * W * 4;
+            dst[row..row + W * 4].copy_from_slice(&src[srow..srow + W * 4]);
+        }
     }
 }
 
