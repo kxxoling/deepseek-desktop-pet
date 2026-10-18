@@ -202,6 +202,15 @@ pub fn get_str(key: &str) -> Option<String> {
     with_global(|c| c.get(key).and_then(Value::as_str).map(str::to_string))
 }
 
+/// 窗口不透明度合法范围（config `opacity`）
+pub const OPACITY_MIN: f64 = 0.1;
+pub const OPACITY_MAX: f64 = 1.0;
+
+/// 把不透明度钳制到合法范围，窗口层直接使用这个结果
+pub fn clamp_opacity(v: f64) -> f64 {
+    v.clamp(OPACITY_MIN, OPACITY_MAX)
+}
+
 /// 写入并立即保存到磁盘；失败只记日志，不影响内存值
 pub fn set(key: &str, value: impl Into<Value>) {
     let g = global();

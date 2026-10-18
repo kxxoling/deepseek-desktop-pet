@@ -444,6 +444,7 @@ impl PetSurface {
         gpu: &Gpu,
         hwnd: windows::Win32::Foundation::HWND,
         bmp: &mut crate::platform::windows_layered::LayeredBitmap,
+        alpha: u8,
     ) -> Result<(), SurfaceLost> {
         let target = &self.offscreen;
         let view = target
@@ -489,7 +490,7 @@ impl PetSurface {
         let ok = bmp.write_premultiplied(&data, target.width, target.height);
         drop(data);
         target.buffer.unmap();
-        if !ok || !bmp.present(hwnd) {
+        if !ok || !bmp.present(hwnd, alpha) {
             log::error!("UpdateLayeredWindow 提交失败");
         }
         Ok(())

@@ -296,3 +296,12 @@ fn global_init_read_write_and_persistence() {
         std::env::remove_var("DS_PET_CONFIG");
     }
 }
+
+#[test]
+fn clamp_opacity_bounds() {
+    assert_eq!(clamp_opacity(0.0), OPACITY_MIN);
+    assert_eq!(clamp_opacity(2.5), OPACITY_MAX);
+    assert_eq!(clamp_opacity(0.55), 0.55);
+    assert_eq!(clamp_opacity(OPACITY_MIN), OPACITY_MIN);
+    assert_eq!(clamp_opacity(OPACITY_MAX), OPACITY_MAX);
+}
