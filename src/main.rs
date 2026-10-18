@@ -10,6 +10,7 @@
 
 mod anim;
 mod assets;
+mod autostart;
 mod character;
 mod config;
 mod input;
@@ -74,6 +75,7 @@ const MENU_NEW: &str = "app.new";
 const MENU_CLOSE: &str = "pet.close";
 const MENU_LOGS: &str = "app.openlogs";
 const MENU_EXIT: &str = "app.exit";
+const MENU_AUTOSTART: &str = "app.autostart";
 /// 触发片段的菜单项 ID 前缀，后面接类名或「类/子分类」
 const MENU_ANIM_PREFIX: &str = "app.anim.";
 
@@ -102,9 +104,17 @@ fn item(id: &str, label: &str) -> MenuItemDef {
     }
 }
 
+fn check(id: &str, label: &str, checked: bool) -> MenuItemDef {
+    MenuItemDef::Check {
+        id: id.to_string(),
+        label: label.to_string(),
+        checked,
+    }
+}
+
 /// 右键菜单；events 类有子分类时，追加「动画」子菜单逐项触发
-fn context_menu_defs(subs: &[String]) -> Vec<MenuItemDef> {
-    let mut defs = base_context_defs();
+fn context_menu_defs(subs: &[String], autostart_on: bool) -> Vec<MenuItemDef> {
+    let mut defs = base_context_defs(autostart_on);
     if !subs.is_empty() {
         let children = subs
             .iter()
@@ -121,20 +131,22 @@ fn context_menu_defs(subs: &[String]) -> Vec<MenuItemDef> {
     defs
 }
 
-fn base_context_defs() -> Vec<MenuItemDef> {
+fn base_context_defs(autostart_on: bool) -> Vec<MenuItemDef> {
     vec![
         item(MENU_NEW, "新增一只"),
         item(MENU_CLOSE, "关闭这只"),
         item(MENU_LOGS, "打开日志文件夹"),
+        check(MENU_AUTOSTART, "开机自启", autostart_on),
         item(MENU_EXIT, "退出"),
     ]
 }
 
 /// 托盘菜单（无「关闭这只」：托盘不指向具体窗口）
-fn tray_menu_defs() -> Vec<MenuItemDef> {
+fn tray_menu_defs(autostart_on: bool) -> Vec<MenuItemDef> {
     vec![
         item(MENU_NEW, "新增一只"),
         item(MENU_LOGS, "打开日志文件夹"),
+        check(MENU_AUTOSTART, "开机自启", autostart_on),
         item(MENU_EXIT, "退出"),
     ]
 }
@@ -214,12 +226,12 @@ fn build_menu(defs: &[MenuItemDef]) -> muda::Result<muda::Menu> {
     Ok(menu)
 }
 
-fn build_context_menu(lib: &Library) -> muda::Result<muda::Menu> {
-    build_menu(&context_menu_defs(&events_subcategories(lib)))
+fn build_context_menu(lib: &Library, autostart_on: bool) -> muda::Result<muda::Menu> {
+    build_menu(&context_menu_defs(&events_subcategories(lib), autostart_on))
 }
 
-fn build_tray_menu() -> muda::Result<muda::Menu> {
-    build_menu(&tray_menu_defs())
+fn build_tray_menu(autostart_on: bool) -> muda::Result<muda::Menu> {
+    build_menu(&tray_menu_defs(autostart_on))
 }
 
 fn build_tray(
@@ -339,6 +351,28 @@ impl App {
         }
     }
 
+    /// 切换开机自启并重建两处菜单刷新勾选态
+    fn toggle_autostart(&mut self) {
+        let ok = if autostart::is_enabled() {
+            autostart::disable()
+        } else {
+            autostart::enable()
+        };
+        if !ok {
+            log::error!("切换开机自启失败");
+            return;
+        }
+        let on = autostart::is_enabled();
+        if let Ok(menu) = build_context_menu(&self.lib, on) {
+            self.ctx_menu = std::rc::Rc::new(menu);
+        }
+        if let Some(tray) = &self.tray
+            && let Ok(menu) = build_tray_menu(on)
+        {
+            tray.set_menu(Some(Box::new(menu)));
+        }
+    }
+
     fn handle_menu_id(&mut self, event_loop: &ActiveEventLoop, id: &str) {
         log::debug!("MenuEvent 收到：{id}");
         match id {
@@ -349,6 +383,7 @@ impl App {
                 }
             }
             MENU_LOGS => open_in_file_manager(&logging::log_dir()),
+            MENU_AUTOSTART => self.toggle_autostart(),
             MENU_EXIT => event_loop.exit(),
             _ if let Some(spec) = id.strip_prefix(MENU_ANIM_PREFIX) => {
                 let _ = self
@@ -531,8 +566,11 @@ fn main() {
 
     let proxy = event_loop.create_proxy();
 
-    let ctx_menu = std::rc::Rc::new(build_context_menu(&lib).expect("右键菜单创建失败"));
-    let tray_menu = build_tray_menu().expect("托盘菜单创建失败");
+    autostart::cleanup_stale();
+    let ctx_menu = std::rc::Rc::new(
+        build_context_menu(&lib, autostart::is_enabled()).expect("右键菜单创建失败"),
+    );
+    let tray_menu = build_tray_menu(autostart::is_enabled()).expect("托盘菜单创建失败");
     let icon = lib
         .find_idle()
         .and_then(|id| lib.first_frame(&id))
@@ -599,7 +637,7 @@ mod tests {
 
     #[test]
     fn menu_ids_unique_and_nonempty() {
-        for defs in [base_context_defs(), tray_menu_defs()] {
+        for defs in [base_context_defs(true), tray_menu_defs(false)] {
             let mut ids = Vec::new();
             collect_ids(&defs, &mut ids);
             assert_ne!(ids, [] as [&'static str; 0]);
@@ -614,15 +652,15 @@ mod tests {
 
     #[test]
     fn menus_match_previous_structure() {
-        let ctx_defs = base_context_defs();
+        let ctx_defs = base_context_defs(false);
         let mut ctx = Vec::new();
         collect_ids(&ctx_defs, &mut ctx);
-        let tray_defs = tray_menu_defs();
+        let tray_defs = tray_menu_defs(false);
         let mut tray = Vec::new();
         collect_ids(&tray_defs, &mut tray);
-        // 右键四项、托盘三项；「关闭这只」只在右键
-        assert_eq!(ctx.len(), 4);
-        assert_eq!(tray.len(), 3);
+        // 右键五项、托盘四项（各含「开机自启」勾选项）；「关闭这只」只在右键
+        assert_eq!(ctx.len(), 5);
+        assert_eq!(tray.len(), 4);
         assert!(ctx.contains(&MENU_CLOSE));
         assert!(!tray.contains(&MENU_CLOSE));
         for id in [MENU_NEW, MENU_LOGS, MENU_EXIT] {
@@ -706,9 +744,9 @@ mod tests {
 
     #[test]
     fn anim_submenu_appends_and_prefixes() {
-        let defs = context_menu_defs(&["balance".to_string()]);
-        // 基础四项之上插入「动画」子菜单
-        assert_eq!(defs.len(), 5);
+        let defs = context_menu_defs(&["balance".to_string()], false);
+        // 基础五项之上插入「动画」子菜单
+        assert_eq!(defs.len(), 6);
         let MenuItemDef::Submenu { label, children } = &defs[2] else {
             panic!("第三项应为动画子菜单");
         };
@@ -719,6 +757,6 @@ mod tests {
         assert_eq!(id, "app.anim.events/balance");
         assert_eq!(label, "balance");
         // 没有子分类时不追加
-        assert_eq!(context_menu_defs(&[]).len(), 4);
+        assert_eq!(context_menu_defs(&[], false).len(), 5);
     }
 }
