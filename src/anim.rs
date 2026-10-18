@@ -19,6 +19,9 @@ const RANDOM_EVERY_MAX: f64 = 40.0;
 pub const WALK_PROB: f64 = 0.4;
 /// 随机事件中穿插 turn 片段的概率（无 turn 资产时不生效）
 pub const TURN_IDLE_PROB: f64 = 0.15;
+/// 播放速率范围（config `playback_speed`，越界钳制）
+pub const SPEED_MIN: f64 = 1.0;
+pub const SPEED_MAX: f64 = 2.0;
 
 pub fn rand_range(min: f64, max: f64) -> f64 {
     min + (max - min) * (rand_u64() as f64 / u64::MAX as f64)
@@ -98,6 +101,8 @@ pub struct Anim {
     pub frame_idx: usize,
     /// 水平镜像（朝右行走时翻转；`no_mirror` 名单除外）
     pub mirrored: bool,
+    /// 播放速率（1.0–2.0），帧间隔按此缩短
+    speed: f64,
     next_frame_at: Option<Instant>,
     /// 下次随机事件时刻（仅 Idle 态有效）
     pub next_event_at: Instant,
@@ -204,6 +209,7 @@ impl Anim {
             first,
             frame_idx: 0,
             mirrored: false,
+            speed: 1.0,
             next_frame_at: None,
             next_event_at: Instant::now()
                 + std::time::Duration::from_secs_f64(rand_range(
@@ -233,7 +239,7 @@ impl Anim {
         self.frame_idx = 0;
         self.mode = mode;
         self.mirrored = mirrored;
-        self.next_frame_at = Some(Instant::now() + crate::library::FRAME_DUR);
+        self.next_frame_at = Some(Instant::now() + self.frame_interval());
         // 任何剪辑切换都使既有的后续计划与待播触发作废
         self.pending = None;
         self.pending_trigger = None;
@@ -345,6 +351,16 @@ impl Anim {
         self.next_frame_at
     }
 
+    /// 设置播放速率，越界钳制到 1.0–2.0
+    pub fn set_speed(&mut self, speed: f64) {
+        self.speed = speed.clamp(SPEED_MIN, SPEED_MAX);
+    }
+
+    /// 当前帧间隔（提高速率靠缩短间隔，不跳帧）
+    fn frame_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(crate::library::FRAME_DUR.as_secs_f64() / self.speed)
+    }
+
     pub fn is_loaded(&self) -> bool {
         self.frames.is_some()
     }
@@ -356,20 +372,17 @@ impl Anim {
 
     /// 帧推进。返回 `WalkLoopDone` 时调用方负责行走位移与圈数递减。
     pub fn tick(&mut self, now: Instant) -> Tick {
+        let interval = self.frame_interval();
         let Some(next) = self.next_frame_at else {
-            self.next_frame_at = Some(now + crate::library::FRAME_DUR);
+            self.next_frame_at = Some(now + interval);
             return Tick::Idle;
         };
         if now < next {
             return Tick::Idle;
         }
         // 补帧上限：落后超过 4 帧直接重同步，避免后台加载/卡顿后狂追帧
-        let base = if next.elapsed() > crate::library::FRAME_DUR * 4 {
-            now
-        } else {
-            next
-        };
-        self.next_frame_at = Some(base + crate::library::FRAME_DUR);
+        let base = if now - next > interval * 4 { now } else { next };
+        self.next_frame_at = Some(base + interval);
 
         let len = self.frame_len();
         let next_idx = self.frame_idx + 1;
@@ -580,6 +593,111 @@ mod state_tests {
         // 落后 10 帧（> 4 帧上限）→ 重同步到 t+1 帧
         a.tick(t0 + crate::library::FRAME_DUR * 10);
         assert_eq!(a.frame_idx, 1);
+    }
+
+    #[test]
+    fn set_speed_clamps_out_of_range() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        let dur = crate::library::FRAME_DUR;
+        a.set_speed(0.1);
+        assert_eq!(a.frame_interval(), dur);
+        a.set_speed(9.0);
+        assert_eq!(a.frame_interval(), dur / 2);
+        a.set_speed(1.5);
+        // 1.5 倍速率的间隔无法整除，容差内即可
+        let want = std::time::Duration::from_secs_f64(dur.as_secs_f64() / 1.5);
+        let got = a.frame_interval();
+        let diff = got.abs_diff(want);
+        assert!(diff < std::time::Duration::from_nanos(1_000));
+    }
+
+    #[test]
+    fn default_speed_interval_equals_frame_dur() {
+        let a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        assert_eq!(a.frame_interval(), crate::library::FRAME_DUR);
+    }
+
+    #[test]
+    fn double_speed_advances_at_half_frame() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(6)),
+        );
+        a.set_speed(SPEED_MAX);
+        let t0 = Instant::now();
+        a.tick(t0);
+        // 半帧到点即推进，半帧内未到不连推
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR / 2),
+            Tick::Advanced
+        ));
+        assert_eq!(a.frame_idx, 1);
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR * 5 / 8),
+            Tick::Idle
+        ));
+        assert_eq!(a.frame_idx, 1);
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR),
+            Tick::Advanced
+        ));
+        assert_eq!(a.frame_idx, 2);
+    }
+
+    #[test]
+    fn one_point_five_speed_advance_sequence() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(6)),
+        );
+        a.set_speed(1.5);
+        let t0 = Instant::now();
+        a.tick(t0);
+        let step =
+            std::time::Duration::from_secs_f64(crate::library::FRAME_DUR.as_secs_f64() / 1.5);
+        for i in 1..=3u32 {
+            assert!(matches!(a.tick(t0 + step * i), Tick::Advanced));
+            assert_eq!(a.frame_idx, i as usize);
+        }
+        // 下一拍未到不推进
+        assert!(matches!(a.tick(t0 + step * 3 + step / 2), Tick::Idle));
+    }
+
+    #[test]
+    fn double_speed_resync_threshold_scales_down() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(100)),
+        );
+        a.set_speed(SPEED_MAX);
+        let t0 = Instant::now();
+        a.tick(t0);
+        let half = crate::library::FRAME_DUR / 2;
+        // 落后 5 个半帧（> 4 个上限）→ 重同步，next 改从 now 起排
+        let late = t0 + half * 6;
+        a.tick(late);
+        assert_eq!(a.next_frame_at(), Some(late + half));
+        // 落后 2 个半帧（未超限）→ 按原时刻表追帧
+        let mut b = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(100)),
+        );
+        b.set_speed(SPEED_MAX);
+        b.tick(t0);
+        b.tick(t0 + half * 3);
+        assert_eq!(b.next_frame_at(), Some(t0 + half * 2));
     }
 
     #[test]
