@@ -20,8 +20,6 @@ pub const WIN_W: f64 = 320.0;
 pub const WIN_H: f64 = 180.0;
 /// 点击穿透 alpha 阈值
 const HIT_ALPHA: u8 = 24;
-const INERTIA_DECAY_PER_MS: f64 = 0.976_144;
-const INERTIA_STOP: f64 = 0.02;
 pub const MAX_PETS: usize = 8;
 
 pub enum WindowRequest {
@@ -296,7 +294,7 @@ impl PetWindow {
 
     // ---------- 窗口定位 ----------
 
-    fn window_pos_logical(&self) -> Option<(f64, f64)> {
+    pub fn window_pos_logical(&self) -> Option<(f64, f64)> {
         let scale = self.window.scale_factor();
         self.window.outer_position().ok().map(|p| {
             let l: LogicalPosition<f64> = p.to_logical(scale);
@@ -479,21 +477,40 @@ impl PetWindow {
         self.move_window_by(dx, 0.0, true);
     }
 
-    /// 拖拽松手后的惯性滑行（60Hz，与动画帧率解耦）
-    fn inertia_step(&mut self, now: Instant) {
-        let dt_ms = now.duration_since(self.last_tick_at).as_secs_f64() * 1000.0;
-        let dt_ms = dt_ms.min(50.0);
-        let (vx, vy) = self.velocity;
-        if vx.abs() < INERTIA_STOP && vy.abs() < INERTIA_STOP {
-            self.enter_idle();
-            return;
+    /// 窗口状态同步进物理世界：拖拽中无限重只挡不弹，松手后的滑行是飞行，其余静止
+    pub fn sync_body_out(&mut self, body: &mut crate::physics::PetBody) {
+        if let Some((x, y)) = self.window_pos_logical() {
+            body.pos = (x, y);
         }
-        self.move_window_by(vx * dt_ms, vy * dt_ms, false);
-        let decay = INERTIA_DECAY_PER_MS.powf(dt_ms);
-        self.velocity = (vx * decay, vy * decay);
+        if self.drag.is_some() {
+            body.state = crate::physics::PetState::Dragging;
+            body.vel = (0.0, 0.0);
+        } else if matches!(self.anim.mode, Mode::Drag) {
+            // 交接瞬间带上拖拽速度（px/ms 换算 px/s），其后速度归物理所有
+            if body.state != crate::physics::PetState::Flying {
+                body.state = crate::physics::PetState::Flying;
+                body.vel = (self.velocity.0 * 1000.0, self.velocity.1 * 1000.0);
+            }
+        } else {
+            body.state = crate::physics::PetState::Resting;
+            body.vel = (0.0, 0.0);
+        }
     }
 
-    /// 主 tick（约 60Hz 调用）：随机事件、帧推进、惯性、穿透轮询
+    /// 物理解算写回：位置变化落到窗口，落稳（飞行转静止）后回 Idle
+    pub fn apply_body(&mut self, body: &crate::physics::PetBody) {
+        if matches!(self.anim.mode, Mode::Drag) && body.state == crate::physics::PetState::Resting {
+            self.enter_idle();
+        }
+        if let Some((x, y)) = self.window_pos_logical()
+            && (x - body.pos.0).abs() + (y - body.pos.1).abs() > 0.5
+        {
+            self.window
+                .set_outer_position(LogicalPosition::new(body.pos.0, body.pos.1));
+        }
+    }
+
+    /// 主 tick（约 60Hz 调用）：随机事件、帧推进、穿透轮询
     pub fn tick(&mut self, now: Instant) {
         self.last_tick_at = now;
 
@@ -555,11 +572,6 @@ impl PetWindow {
             if self.render_step.is_multiple_of(u64::from(stride)) {
                 self.blit();
             }
-        }
-
-        // 松手后惯性（mode 仍为 Drag 且无拖拽状态）
-        if matches!(self.anim.mode, Mode::Drag) && self.drag.is_none() {
-            self.inertia_step(now);
         }
 
         self.hit_poll();
@@ -667,7 +679,7 @@ impl PetWindow {
                 self.velocity = (0.0, 0.0); // 单击不走惯性
                 self.play_oneshot_in("click");
             }
-            // 否则保持 Mode::Drag，velocity 驱动惯性；速度过小由 inertia_step 收尾回 Idle
+            // 否则保持 Mode::Drag，速度交给物理世界飞行，落稳后由物理侧收尾回 Idle
         }
         None
     }
@@ -696,7 +708,7 @@ impl PetWindow {
         }
     }
 
-    /// 拖拽中或惯性滑行（事件循环据此提高唤醒频率）
+    /// 拖拽中或物理飞行中（事件循环据此提高唤醒频率）
     pub fn is_interacting(&self) -> bool {
         self.drag.is_some() || matches!(self.anim.mode, Mode::Drag)
     }
