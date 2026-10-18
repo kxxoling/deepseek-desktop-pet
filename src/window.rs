@@ -10,6 +10,7 @@ use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
 
 use crate::UserEvent;
 use crate::anim::{Anim, Mode, Tick, WalkDir, curve_at, random_pick};
+use crate::input::{Action, InputState};
 use crate::library::{ClipId, FRAME_BYTES, FRAME_H, FRAME_W, Library};
 use crate::platform;
 use crate::render::{Gpu, PetSurface};
@@ -17,9 +18,6 @@ use crate::render::{Gpu, PetSurface};
 /// 窗口逻辑尺寸（= 帧尺寸；整数倍缩放像素精确）
 pub const WIN_W: f64 = 320.0;
 pub const WIN_H: f64 = 180.0;
-const DOUBLE_CLICK_SECS: f64 = 0.4;
-const CLICK_SECS: f64 = 0.35;
-const CLICK_MOVE_PX: f64 = 6.0;
 /// 点击穿透 alpha 阈值
 const HIT_ALPHA: u8 = 24;
 const INERTIA_DECAY_PER_MS: f64 = 0.976_144;
@@ -63,10 +61,8 @@ pub struct PetWindow {
     cursor_phys: (f64, f64),
     ignoring_cursor: bool,
 
-    last_press: Option<Instant>,
-    press_pos: (f64, f64),
-    /// 双击后抑制本次松手的单击判定
-    suppress_single: bool,
+    /// 单击/双击/拖拽判定（纯状态机，见 input.rs）
+    input: InputState,
 
     /// 行走状态（步幅已换算到逻辑像素：`stride_native` × 320/640）
     walk_stride: f64,
@@ -154,9 +150,7 @@ impl PetWindow {
             cursor_local: (0.0, 0.0),
             cursor_phys: (0.0, 0.0),
             ignoring_cursor: false,
-            last_press: None,
-            press_pos: (0.0, 0.0),
-            suppress_single: false,
+            input: InputState::default(),
             walk_stride: 0.0,
             walk_last_curve: 0.0,
         };
@@ -546,7 +540,7 @@ impl PetWindow {
                 ..
             } => self.on_left_release(),
             WindowEvent::Focused(false) => {
-                // 失焦兜底：终止拖拽
+                // 失焦只终止拖拽，不清点击判定（清了会误杀双击）
                 if self.drag.take().is_some() {
                     self.window.set_cursor(CursorIcon::Default);
                     self.velocity = (0.0, 0.0);
@@ -564,51 +558,34 @@ impl PetWindow {
 
     /// 左键按下：双击多开判定，否则进入拖拽
     fn on_left_press(&mut self) -> Option<WindowRequest> {
-        let now = Instant::now();
-        // 双击多开：时限内第二次按下
-        if let Some(t) = self.last_press
-            && now.duration_since(t).as_secs_f64() < DOUBLE_CLICK_SECS
-        {
-            self.last_press = None;
-            self.suppress_single = true;
-            let at = self.spawn_pos_near_cursor();
-            let _ = self.proxy.send_event(UserEvent::SpawnPet { at: Some(at) });
-            return None;
+        match self.input.press(Instant::now(), self.cursor_local) {
+            Action::DoubleClick => {
+                let at = self.spawn_pos_near_cursor();
+                let _ = self.proxy.send_event(UserEvent::SpawnPet { at: Some(at) });
+            }
+            Action::DragStart { offset } => self.begin_drag(offset),
+            Action::Click | Action::None => {}
         }
-        self.last_press = Some(now);
-        self.press_pos = self.cursor_local;
-        self.suppress_single = false;
-        self.begin_drag();
         None
     }
 
     /// 左键松开：短按且未位移视为单击，否则交给惯性
     fn on_left_release(&mut self) -> Option<WindowRequest> {
+        // 无论是否拖拽中都推进判定状态（清双击抑制标志）
+        let action = self.input.release(Instant::now(), self.cursor_local);
         if self.drag.take().is_some() {
             self.window.set_cursor(CursorIcon::Default);
-            let (dx, dy) = (
-                self.cursor_local.0 - self.press_pos.0,
-                self.cursor_local.1 - self.press_pos.1,
-            );
-            let moved = (dx * dx + dy * dy).sqrt();
-            let quick = self
-                .last_press
-                .is_some_and(|t| t.elapsed().as_secs_f64() < CLICK_SECS);
-            if !self.suppress_single && quick && moved < CLICK_MOVE_PX {
+            if action == Action::Click {
                 self.velocity = (0.0, 0.0); // 单击不走惯性
                 self.play_oneshot_in("click");
             }
             // 否则保持 Mode::Drag，velocity 驱动惯性；速度过小由 inertia_step 收尾回 Idle
         }
-        self.suppress_single = false;
         None
     }
 
-    fn begin_drag(&mut self) {
-        // cursor_local 即 光标全局 - 窗口位置，直接作为抓取偏移
-        self.drag = Some(DragState {
-            offset: self.cursor_local,
-        });
+    fn begin_drag(&mut self, offset: (f64, f64)) {
+        self.drag = Some(DragState { offset });
         self.velocity = (0.0, 0.0);
         self.last_drag_move = None;
         self.ignoring_cursor = false;
