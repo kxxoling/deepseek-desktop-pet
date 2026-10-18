@@ -81,6 +81,8 @@ pub struct PetWindow {
     power_save_idle_secs: u64,
     /// 已渲染帧计数（省电时隔帧渲染的除法基准）
     render_step: u64,
+    /// 甩出力度的倍率（config `throw_strength`，读取时已钳制）
+    throw_mult: f64,
 }
 
 impl PetWindow {
@@ -190,6 +192,8 @@ impl PetWindow {
             power_save_idle_secs: crate::config::get_i64("power_saving_idle_secs")
                 .map_or(0, |v| v.max(0) as u64),
             render_step: 0,
+            throw_mult: crate::config::get_f64("throw_strength")
+                .map_or(1.0, crate::physics::clamp_throw_strength),
         };
         pet.blit();
         Ok(pet)
@@ -505,10 +509,13 @@ impl PetWindow {
             body.state = crate::physics::PetState::Dragging;
             body.vel = (0.0, 0.0);
         } else if matches!(self.anim.mode, Mode::Drag) {
-            // 交接瞬间带上拖拽速度（px/ms 换算 px/s），其后速度归物理所有
+            // 交接瞬间带上拖拽速度（px/ms 换算成 px/s 后按力度倍率放大），之后速度归物理世界管
             if body.state != crate::physics::PetState::Flying {
                 body.state = crate::physics::PetState::Flying;
-                body.vel = (self.velocity.0 * 1000.0, self.velocity.1 * 1000.0);
+                body.vel = (
+                    self.velocity.0 * 1000.0 * self.throw_mult,
+                    self.velocity.1 * 1000.0 * self.throw_mult,
+                );
             }
         } else {
             body.state = crate::physics::PetState::Resting;
