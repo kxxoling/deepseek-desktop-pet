@@ -48,6 +48,9 @@ struct App {
     gpu: Arc<render::Gpu>,
     proxy: EventLoopProxy<UserEvent>,
     pets: Vec<PetWindow>,
+    /// 碰撞世界（`pets` 与 `physics.pets` 按下标一一对应）
+    physics: physics::World,
+    last_phys_at: Instant,
     // muda::Menu 非 Send/Sync，用 Rc 即可（仅主线程使用）
     ctx_menu: std::rc::Rc<muda::Menu>,
     #[allow(dead_code)] // 托盘句柄需保活
@@ -272,6 +275,23 @@ fn default_spawn_pos(event_loop: &ActiveEventLoop) -> (f64, f64) {
     }
 }
 
+/// 物理世界的地面边界取主屏逻辑尺寸（拿不到显示器时给一个常见值兜底）
+fn monitor_bounds(mon: Option<winit::monitor::MonitorHandle>) -> physics::Bounds {
+    match mon {
+        Some(m) => {
+            let size: winit::dpi::LogicalSize<f64> = m.size().to_logical(m.scale_factor());
+            physics::Bounds {
+                width: size.width,
+                height: size.height,
+            }
+        }
+        None => physics::Bounds {
+            width: 1512.0,
+            height: 982.0,
+        },
+    }
+}
+
 impl App {
     fn spawn_pet(&mut self, event_loop: &ActiveEventLoop, at: Option<(f64, f64)>) {
         if self.pets.len() >= MAX_PETS {
@@ -299,6 +319,8 @@ impl App {
                     pet.id(),
                     self.pets.len() + 1
                 );
+                let body_pos = pet.window_pos_logical().unwrap_or((240.0, 160.0));
+                self.physics.pets.push(physics::PetBody::new(body_pos));
                 self.pets.push(pet);
             }
             Err(e) => log::error!("创建宠物窗口失败：{e}"),
@@ -309,6 +331,7 @@ impl App {
         // CloseRequested 与随后窗口销毁的 Destroyed 会各调一次，找不到时静默跳过
         if let Some(pos) = self.pets.iter().position(|p| p.id() == id) {
             self.pets.remove(pos);
+            self.physics.pets.remove(pos);
             log::info!("关闭宠物窗口（剩余 {} 只）", self.pets.len());
             if self.pets.is_empty() {
                 log::info!("全部窗口已关闭，托盘保活中（托盘「新增一只」可召回）");
@@ -341,6 +364,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if !self.spawned_initial {
             self.spawned_initial = true;
+            self.physics.bounds = monitor_bounds(
+                event_loop
+                    .primary_monitor()
+                    .or_else(|| event_loop.available_monitors().next()),
+            );
             self.spawn_pet(event_loop, None);
         }
     }
@@ -432,7 +460,27 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        self.step_physics(now);
+
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+    }
+}
+
+impl App {
+    /// 窗口状态进物理世界、解算、结果写回（与宠物列表同下标对齐）
+    fn step_physics(&mut self, now: Instant) {
+        let dt = now
+            .duration_since(self.last_phys_at)
+            .as_secs_f64()
+            .min(0.05);
+        self.last_phys_at = now;
+        for (pet, body) in self.pets.iter_mut().zip(self.physics.pets.iter_mut()) {
+            pet.sync_body_out(body);
+        }
+        self.physics.step(dt);
+        for (pet, body) in self.pets.iter_mut().zip(self.physics.pets.iter_mut()) {
+            pet.apply_body(body);
+        }
     }
 }
 
@@ -512,6 +560,12 @@ fn main() {
         gpu,
         proxy,
         pets: Vec::new(),
+        // 边界依赖显示器信息，resumed 首次回调时补上真实值
+        physics: physics::World::new(physics::Bounds {
+            width: 0.0,
+            height: 0.0,
+        }),
+        last_phys_at: Instant::now(),
         ctx_menu,
         tray,
         menu_target: None,
