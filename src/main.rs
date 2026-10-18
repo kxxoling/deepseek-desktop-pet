@@ -10,6 +10,7 @@
 
 mod anim;
 mod assets;
+mod character;
 mod config;
 mod input;
 mod library;
