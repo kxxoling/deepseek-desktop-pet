@@ -35,7 +35,11 @@ use crate::window::{MAX_PETS, PetWindow, WindowRequest};
 /// 事件循环自定义事件（proxy 转发：后台解码线程 / 宠物窗口上抛）
 pub enum UserEvent {
     ClipLoaded(ClipId, Arc<ClipFrames>),
-    SpawnPet { at: Option<(f64, f64)> },
+    SpawnPet {
+        at: Option<(f64, f64)>,
+    },
+    /// 触发播放特殊片段，参数为类名或「类/子分类」
+    TriggerClip(String),
     ExitApp,
 }
 
@@ -67,63 +71,88 @@ const MENU_NEW: &str = "app.new";
 const MENU_CLOSE: &str = "pet.close";
 const MENU_LOGS: &str = "app.openlogs";
 const MENU_EXIT: &str = "app.exit";
+/// 触发片段的菜单项 ID 前缀，后面接类名或「类/子分类」
+const MENU_ANIM_PREFIX: &str = "app.anim.";
 
-/// 菜单项定义（纯数据表，加菜单项就是往表里加一行）；muda 菜单构建必须在主线程
+/// 菜单项定义（纯数据，加菜单项就是往表里加一行）；muda 菜单构建必须在主线程
 #[allow(dead_code)]
 enum MenuItemDef {
     /// 普通项
-    Item {
-        id: &'static str,
-        label: &'static str,
-    },
+    Item { id: String, label: String },
     /// 勾选项（设置开关用）
     Check {
-        id: &'static str,
-        label: &'static str,
+        id: String,
+        label: String,
         checked: bool,
     },
     /// 子菜单（树）
     Submenu {
-        label: &'static str,
-        children: &'static [MenuItemDef],
+        label: String,
+        children: Vec<MenuItemDef>,
     },
 }
 
-/// 右键菜单注册表
-const CONTEXT_MENU: &[MenuItemDef] = &[
+fn item(id: &str, label: &str) -> MenuItemDef {
     MenuItemDef::Item {
-        id: MENU_NEW,
-        label: "新增一只",
-    },
-    MenuItemDef::Item {
-        id: MENU_CLOSE,
-        label: "关闭这只",
-    },
-    MenuItemDef::Item {
-        id: MENU_LOGS,
-        label: "打开日志文件夹",
-    },
-    MenuItemDef::Item {
-        id: MENU_EXIT,
-        label: "退出",
-    },
-];
+        id: id.to_string(),
+        label: label.to_string(),
+    }
+}
 
-/// 托盘菜单注册表（无「关闭这只」：托盘不指向具体窗口）
-const TRAY_MENU: &[MenuItemDef] = &[
-    MenuItemDef::Item {
-        id: MENU_NEW,
-        label: "新增一只",
-    },
-    MenuItemDef::Item {
-        id: MENU_LOGS,
-        label: "打开日志文件夹",
-    },
-    MenuItemDef::Item {
-        id: MENU_EXIT,
-        label: "退出",
-    },
-];
+/// 右键菜单；events 类有子分类时，追加「动画」子菜单逐项触发
+fn context_menu_defs(subs: &[String]) -> Vec<MenuItemDef> {
+    let mut defs = base_context_defs();
+    if !subs.is_empty() {
+        let children = subs
+            .iter()
+            .map(|s| item(&format!("{MENU_ANIM_PREFIX}events/{s}"), s))
+            .collect();
+        defs.insert(
+            2,
+            MenuItemDef::Submenu {
+                label: "动画".to_string(),
+                children,
+            },
+        );
+    }
+    defs
+}
+
+fn base_context_defs() -> Vec<MenuItemDef> {
+    vec![
+        item(MENU_NEW, "新增一只"),
+        item(MENU_CLOSE, "关闭这只"),
+        item(MENU_LOGS, "打开日志文件夹"),
+        item(MENU_EXIT, "退出"),
+    ]
+}
+
+/// 托盘菜单（无「关闭这只」：托盘不指向具体窗口）
+fn tray_menu_defs() -> Vec<MenuItemDef> {
+    vec![
+        item(MENU_NEW, "新增一只"),
+        item(MENU_LOGS, "打开日志文件夹"),
+        item(MENU_EXIT, "退出"),
+    ]
+}
+
+/// events 类下的子分类名，去重排序；直接放在 events/ 下的片段不算子分类
+fn events_subcategories(lib: &Library) -> Vec<String> {
+    events_subcategories_of(&lib.clips_in_category("events"))
+}
+
+fn events_subcategories_of(ids: &[ClipId]) -> Vec<String> {
+    let mut subs: Vec<String> = ids
+        .iter()
+        .filter_map(|id| {
+            let segs: Vec<&str> = id.0.split('/').collect();
+            (segs.len() >= 3).then(|| segs[1].to_string())
+        })
+        .collect();
+    subs.sort();
+    subs.dedup();
+    subs
+}
 
 fn menu_item(id: &str, label: &str) -> muda::MenuItem {
     muda::MenuItem::with_id(muda::MenuId::new(id), label, true, None)
@@ -155,7 +184,7 @@ fn append_defs(menu: &impl AppendItem, defs: &[MenuItemDef]) -> muda::Result<()>
             }
             MenuItemDef::Check { id, label, checked } => {
                 menu.append_item(&muda::CheckMenuItem::with_id(
-                    muda::MenuId::new(*id),
+                    muda::MenuId::new(id),
                     label,
                     *checked,
                     true,
@@ -182,12 +211,12 @@ fn build_menu(defs: &[MenuItemDef]) -> muda::Result<muda::Menu> {
     Ok(menu)
 }
 
-fn build_context_menu() -> muda::Result<muda::Menu> {
-    build_menu(CONTEXT_MENU)
+fn build_context_menu(lib: &Library) -> muda::Result<muda::Menu> {
+    build_menu(&context_menu_defs(&events_subcategories(lib)))
 }
 
 fn build_tray_menu() -> muda::Result<muda::Menu> {
-    build_menu(TRAY_MENU)
+    build_menu(&tray_menu_defs())
 }
 
 fn build_tray(
@@ -298,6 +327,11 @@ impl App {
             }
             MENU_LOGS => open_in_file_manager(&logging::log_dir()),
             MENU_EXIT => event_loop.exit(),
+            _ if let Some(spec) = id.strip_prefix(MENU_ANIM_PREFIX) => {
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::TriggerClip(spec.to_string()));
+            }
             _ => log::debug!("未知菜单项：{id}"),
         }
     }
@@ -325,6 +359,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::SpawnPet { at } => self.spawn_pet(event_loop, at),
+            UserEvent::TriggerClip(spec) => {
+                // 右键菜单在具体宠物上弹出，触发也落在它身上
+                if let Some(target) = self.menu_target
+                    && let Some(pet) = self.pets.iter_mut().find(|p| p.id() == target)
+                    && !pet.trigger_clip(&spec)
+                {
+                    log::debug!("触发被拒绝：{spec}");
+                }
+            }
             UserEvent::ExitApp => event_loop.exit(),
         }
     }
@@ -440,7 +483,7 @@ fn main() {
 
     let proxy = event_loop.create_proxy();
 
-    let ctx_menu = std::rc::Rc::new(build_context_menu().expect("右键菜单创建失败"));
+    let ctx_menu = std::rc::Rc::new(build_context_menu(&lib).expect("右键菜单创建失败"));
     let tray_menu = build_tray_menu().expect("托盘菜单创建失败");
     let icon = lib
         .find_idle()
@@ -491,7 +534,7 @@ mod tests {
     use super::*;
 
     /// 深度收集注册表里的全部菜单项 id（含子菜单）
-    fn collect_ids(defs: &[MenuItemDef], ids: &mut Vec<&'static str>) {
+    fn collect_ids<'a>(defs: &'a [MenuItemDef], ids: &mut Vec<&'a str>) {
         for def in defs {
             match def {
                 MenuItemDef::Item { id, .. } | MenuItemDef::Check { id, .. } => ids.push(id),
@@ -502,9 +545,9 @@ mod tests {
 
     #[test]
     fn menu_ids_unique_and_nonempty() {
-        for defs in [CONTEXT_MENU, TRAY_MENU] {
+        for defs in [base_context_defs(), tray_menu_defs()] {
             let mut ids = Vec::new();
-            collect_ids(defs, &mut ids);
+            collect_ids(&defs, &mut ids);
             assert_ne!(ids, [] as [&'static str; 0]);
             assert!(ids.iter().all(|i| !i.is_empty()), "id 不能为空：{ids:?}");
             let mut sorted = ids.clone();
@@ -517,10 +560,12 @@ mod tests {
 
     #[test]
     fn menus_match_previous_structure() {
+        let ctx_defs = base_context_defs();
         let mut ctx = Vec::new();
-        collect_ids(CONTEXT_MENU, &mut ctx);
+        collect_ids(&ctx_defs, &mut ctx);
+        let tray_defs = tray_menu_defs();
         let mut tray = Vec::new();
-        collect_ids(TRAY_MENU, &mut tray);
+        collect_ids(&tray_defs, &mut tray);
         // 右键四项、托盘三项；「关闭这只」只在右键
         assert_eq!(ctx.len(), 4);
         assert_eq!(tray.len(), 3);
@@ -533,22 +578,22 @@ mod tests {
 
     #[test]
     fn submenu_and_check_defs_traversable() {
-        const NESTED: &[MenuItemDef] = &[MenuItemDef::Submenu {
-            label: "设置",
-            children: &[
+        let nested = vec![MenuItemDef::Submenu {
+            label: "设置".to_string(),
+            children: vec![
                 MenuItemDef::Check {
-                    id: "app.check",
-                    label: "开关",
+                    id: "app.check".to_string(),
+                    label: "开关".to_string(),
                     checked: true,
                 },
                 MenuItemDef::Item {
-                    id: "app.sub",
-                    label: "子项",
+                    id: "app.sub".to_string(),
+                    label: "子项".to_string(),
                 },
             ],
         }];
         let mut ids = Vec::new();
-        collect_ids(NESTED, &mut ids);
+        collect_ids(&nested, &mut ids);
         assert_eq!(ids, vec!["app.check", "app.sub"]);
     }
 
@@ -591,5 +636,35 @@ mod tests {
             std::env::remove_var("DS_PET_POS");
         }
         assert_eq!(parse_pos_env(), None);
+    }
+
+    #[test]
+    fn events_subcategories_dedup_and_sort() {
+        let ids = [
+            ClipId(std::sync::Arc::from("events/balance/余额-分文不剩")),
+            ClipId(std::sync::Arc::from("events/balance/余额-数金皱眉")),
+            ClipId(std::sync::Arc::from("events/喝水")),
+        ];
+        // 直接放在 events/ 下的「喝水」不算子分类
+        assert_eq!(events_subcategories_of(&ids), vec!["balance".to_string()]);
+        assert_eq!(events_subcategories_of(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn anim_submenu_appends_and_prefixes() {
+        let defs = context_menu_defs(&["balance".to_string()]);
+        // 基础四项之上插入「动画」子菜单
+        assert_eq!(defs.len(), 5);
+        let MenuItemDef::Submenu { label, children } = &defs[2] else {
+            panic!("第三项应为动画子菜单");
+        };
+        assert_eq!(label, "动画");
+        let MenuItemDef::Item { id, label } = &children[0] else {
+            panic!("动画子菜单的子项应为普通项");
+        };
+        assert_eq!(id, "app.anim.events/balance");
+        assert_eq!(label, "balance");
+        // 没有子分类时不追加
+        assert_eq!(context_menu_defs(&[]).len(), 4);
     }
 }

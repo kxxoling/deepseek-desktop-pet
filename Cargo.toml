@@ -32,7 +32,8 @@ winit = "0.30"
 zstd = "0.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSEvent", "NSResponder", "NSApplication", "NSView"] }
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSEvent", "NSResponder", "NSApplication", "NSView", "NSMenu", "NSColor"] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

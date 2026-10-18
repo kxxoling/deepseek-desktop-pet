@@ -220,14 +220,50 @@ pub mod windows_layered {
 pub fn show_context_menu(menu: &muda::Menu, window: &Window, x: i32, y: i32) -> bool {
     #[cfg(target_os = "macos")]
     {
-        use muda::ContextMenu;
-        let pos = Some(muda::dpi::Position::Physical(
-            muda::dpi::PhysicalPosition::new(x, y),
-        ));
-        match ns_view_ptr(window) {
-            Some(view) => unsafe { menu.show_context_menu_for_nsview(view, pos) },
-            None => false,
-        }
+        use objc2_app_kit::{NSBackingStoreType, NSColor, NSWindow, NSWindowStyleMask};
+        use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+
+        // 直接在 winit 宠物窗口的 view 上 popUp 会丢带子菜单的行（macOS 26 实测），
+        // 换一个临时原生小窗口承载弹出，位置放在点击点，弹出结束即关闭
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let scale = window.scale_factor();
+        let Some(monitor) = window.current_monitor() else {
+            return false;
+        };
+        let screen_h = f64::from(monitor.size().height) / monitor.scale_factor();
+        let (ox, oy) = window.inner_position().map_or((0, 0), |p| (p.x, p.y));
+        let px = f64::from(ox + x) / scale;
+        let py = screen_h - f64::from(oy + y) / scale - 1.0;
+
+        let helper = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                mtm.alloc(),
+                NSRect::new(NSPoint::new(px, py), NSSize::new(1.0, 1.0)),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        helper.setOpaque(false);
+        helper.setBackgroundColor(Some(&NSColor::clearColor()));
+        helper.orderFrontRegardless();
+        let view = helper.contentView().expect("临时窗口无 contentView");
+        let shown = {
+            use muda::ContextMenu;
+            let ptr: *const std::ffi::c_void = std::ptr::from_ref(&*view).cast();
+            unsafe {
+                menu.show_context_menu_for_nsview(
+                    ptr,
+                    Some(muda::dpi::Position::Physical(
+                        muda::dpi::PhysicalPosition::new(1, 1),
+                    )),
+                )
+            }
+        };
+        helper.close();
+        shown
     }
     #[cfg(target_os = "windows")]
     {
