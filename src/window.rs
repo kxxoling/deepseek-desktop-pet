@@ -126,6 +126,10 @@ impl PetWindow {
             lib.first_frame(&idle).cloned().expect("idle 首帧缺失"),
             lib.get_or_load(&idle, crate::clip_loader(&proxy)),
         );
+        // config 的播放速率（缺省 1.0），越界钳制在 set_speed 内
+        if let Some(speed) = crate::config::get_f64("playback_speed") {
+            anim.set_speed(speed);
+        }
         // trigger_clip 的候选片段池：events 类全部片段，首帧直接共享库缓存
         anim.set_event_clips(
             lib.clips_in_category("events")
