@@ -67,6 +67,13 @@ pub struct PetWindow {
     /// 行走状态（步幅已换算到逻辑像素：`stride_native` × 320/640）
     walk_stride: f64,
     walk_last_curve: f64,
+
+    /// 最近一次交互时刻（省电判定用）
+    last_interaction: Instant,
+    /// 省电阈值秒数（0=关闭，config `power_saving_idle_secs`）
+    power_save_idle_secs: u64,
+    /// 已渲染帧计数（省电时隔帧渲染的除法基准）
+    render_step: u64,
 }
 
 impl PetWindow {
@@ -164,6 +171,10 @@ impl PetWindow {
             input: InputState::default(),
             walk_stride: 0.0,
             walk_last_curve: 0.0,
+            last_interaction: Instant::now(),
+            power_save_idle_secs: crate::config::get_i64("power_saving_idle_secs")
+                .map_or(0, |v| v.max(0) as u64),
+            render_step: 0,
         };
         pet.blit();
         Ok(pet)
@@ -535,7 +546,15 @@ impl PetWindow {
         };
         if advanced {
             self.walk_step();
-            self.blit();
+            // 闲置达到阈值时隔帧渲染（省电），交互一发生即恢复
+            self.render_step = self.render_step.wrapping_add(1);
+            let stride = crate::anim::power_save_stride(
+                self.last_interaction.elapsed().as_secs(),
+                self.power_save_idle_secs,
+            );
+            if self.render_step.is_multiple_of(u64::from(stride)) {
+                self.blit();
+            }
         }
 
         // 松手后惯性（mode 仍为 Drag 且无拖拽状态）
@@ -551,6 +570,7 @@ impl PetWindow {
     pub fn on_window_event(&mut self, event: &WindowEvent) -> Option<WindowRequest> {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
+                self.last_interaction = Instant::now();
                 let scale = self.window.scale_factor();
                 let l: LogicalPosition<f64> = position.to_logical(scale);
                 self.cursor_phys = (position.x, position.y);
@@ -583,6 +603,7 @@ impl PetWindow {
                 button,
                 ..
             } => {
+                self.last_interaction = Instant::now();
                 let hit = self.hit_test_at_cursor();
                 log::debug!(
                     "MouseInput Pressed {button:?} @ {:?} hit={hit}",

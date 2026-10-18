@@ -23,6 +23,16 @@ pub const TURN_IDLE_PROB: f64 = 0.15;
 pub const SPEED_MIN: f64 = 1.0;
 pub const SPEED_MAX: f64 = 2.0;
 
+/// 省电判定：闲置达到阈值后隔帧渲染。返回渲染步进（1=每帧，2=隔一帧）。
+/// 阈值为 0 表示功能关闭，恒为 1。渲染节拍由调用方掌握。
+pub fn power_save_stride(idle_secs: u64, threshold_secs: u64) -> u32 {
+    if threshold_secs > 0 && idle_secs >= threshold_secs {
+        2
+    } else {
+        1
+    }
+}
+
 pub fn rand_range(min: f64, max: f64) -> f64 {
     min + (max - min) * (rand_u64() as f64 / u64::MAX as f64)
 }
@@ -403,6 +413,17 @@ impl Anim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_save_stride_all_branches() {
+        // 阈值 0 表示关闭，闲置再久也不降频
+        assert_eq!(power_save_stride(0, 0), 1);
+        assert_eq!(power_save_stride(600, 0), 1);
+        // 未到阈值不降频，到达即隔帧
+        assert_eq!(power_save_stride(29, 30), 1);
+        assert_eq!(power_save_stride(30, 30), 2);
+        assert_eq!(power_save_stride(300, 30), 2);
+    }
 
     #[test]
     fn curve_at_按时间线性插值() {
