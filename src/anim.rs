@@ -1,20 +1,22 @@
 //! 动画状态机
 //!
-//! - Idle：idle 片段循环，每 20–40s 触发随机事件（40% 行走 / 60% 随机动画）
-//! - OneShot：random/click 片段播完回 Idle
+//! - Idle：idle 片段循环，每 20–40s 触发随机事件（穿插转身 / 行走 / 随机动画）
+//! - OneShot：单次片段播完回 Idle（可携带后续计划）
 //! - Drag：drag 片段循环（拖拽中与松手惯性）
 //! - Walk：move 片段循环，窗口按步幅曲线位移（速度 = stride/圈时长，步态不打滑）
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::library::{ClipFrames, ClipId, FPS, Frame, SRC_FPS};
+use crate::library::{ClipFrames, ClipId, FPS, Frame, Library, SRC_FPS};
 
 /// 随机事件间隔范围（秒）
 const RANDOM_EVERY_MIN: f64 = 20.0;
 const RANDOM_EVERY_MAX: f64 = 40.0;
 /// 随机事件中行走的概率
 pub const WALK_PROB: f64 = 0.4;
+/// 随机事件中穿插 turn 片段的概率（无 turn 资产时不生效）
+pub const TURN_IDLE_PROB: f64 = 0.15;
 
 pub fn rand_range(min: f64, max: f64) -> f64 {
     min + (max - min) * (rand_u64() as f64 / u64::MAX as f64)
@@ -99,6 +101,8 @@ pub struct Anim {
     pub next_event_at: Instant,
     /// 后台加载中的目标 clip（到货即从当前帧集切过去）
     queued: Option<ClipId>,
+    /// 单次片段播完后的后续计划；切片段即作废
+    pending: Option<Plan>,
 }
 
 pub fn random_pick<T>(v: &[T]) -> Option<&T> {
@@ -106,6 +110,73 @@ pub fn random_pick<T>(v: &[T]) -> Option<&T> {
         None
     } else {
         v.get((rand_u64() % v.len() as u64) as usize)
+    }
+}
+
+// ---------- 调度决策 ----------
+// 纯函数：库概况以快照传入，随机值由调用方注入，副作用留给 window
+
+/// 调度所需的库快照
+pub struct SchedSnapshot {
+    /// 库中存在 turn 类片段
+    pub turn_available: bool,
+    /// 库中存在带步幅的 move 片段（Walk 分支可走）
+    pub walk_available: bool,
+}
+
+/// 从帧库提取调度快照
+pub fn sched_snapshot(lib: &Library) -> SchedSnapshot {
+    SchedSnapshot {
+        turn_available: !lib.clips_in_category("turn").is_empty(),
+        walk_available: lib.clips_in_category("move").iter().any(|id| {
+            let name = lib.meta(id).map(|m| m.name.to_string()).unwrap_or_default();
+            lib.move_strides.contains_key(&name)
+        }),
+    }
+}
+
+/// 调度计划：window 侧按此逐项执行剪辑切换
+#[derive(Debug, PartialEq)]
+pub enum Plan {
+    /// 回到 Idle
+    Idle,
+    /// 先播一个 turn 片段，再执行 `next`
+    TurnThen(Box<Plan>),
+    /// random 类随机单次片段
+    RandomClip,
+    /// 行走 `loops` 圈（1..=3）
+    Walk { loops: u32 },
+}
+
+/// Idle 随机事件决策，随机值由调用方注入；无 turn 资产时行为与之前一致
+pub fn plan_idle_event(
+    snap: &SchedSnapshot,
+    roll_event: f64,
+    roll_turn: f64,
+    roll_loops: u64,
+) -> Plan {
+    if snap.turn_available && roll_turn < TURN_IDLE_PROB {
+        return Plan::TurnThen(Box::new(Plan::Idle));
+    }
+    if roll_event < WALK_PROB && snap.walk_available {
+        let walk = Plan::Walk {
+            loops: 1 + (roll_loops % 3) as u32,
+        };
+        return if snap.turn_available {
+            Plan::TurnThen(Box::new(walk))
+        } else {
+            walk
+        };
+    }
+    Plan::RandomClip
+}
+
+/// Walk 走完后的去向：有 turn 资产则先转身再回 Idle
+pub fn plan_walk_end(snap: &SchedSnapshot) -> Plan {
+    if snap.turn_available {
+        Plan::TurnThen(Box::new(Plan::Idle))
+    } else {
+        Plan::Idle
     }
 }
 
@@ -134,6 +205,7 @@ impl Anim {
                     RANDOM_EVERY_MAX,
                 )),
             queued: None,
+            pending: None,
         }
     }
 
@@ -154,6 +226,18 @@ impl Anim {
         self.mode = mode;
         self.mirrored = mirrored;
         self.next_frame_at = Some(Instant::now() + crate::library::FRAME_DUR);
+        // 任何剪辑切换都意味着旧的 turn 后续计划被打断
+        self.pending = None;
+    }
+
+    /// 设置单次片段播完后的去向
+    pub fn set_pending(&mut self, next: Plan) {
+        self.pending = Some(next);
+    }
+
+    /// 取走 `OneShot` 播完后的去向（一次性）
+    pub fn take_pending(&mut self) -> Option<Plan> {
+        self.pending.take()
     }
 
     /// 切到 Idle（保持已有镜像朝向，避免静止时突然翻转）
@@ -511,5 +595,217 @@ mod extra_tests {
             let r = rand_range(5.0, 7.0);
             assert!((5.0..=7.0).contains(&r));
         }
+    }
+}
+
+#[cfg(test)]
+mod sched_tests {
+    use super::*;
+
+    fn snap(turn: bool, walk: bool) -> SchedSnapshot {
+        SchedSnapshot {
+            turn_available: turn,
+            walk_available: walk,
+        }
+    }
+
+    #[test]
+    fn decision_unchanged_without_turn_clips() {
+        let s = snap(false, true);
+        // 40% 行走：圈数 = 1 + roll % 3
+        assert_eq!(plan_idle_event(&s, 0.0, 0.0, 0), Plan::Walk { loops: 1 });
+        assert_eq!(plan_idle_event(&s, 0.39, 0.99, 1), Plan::Walk { loops: 2 });
+        assert_eq!(plan_idle_event(&s, 0.399, 0.5, 2), Plan::Walk { loops: 3 });
+        assert_eq!(plan_idle_event(&s, 0.399, 0.5, 3), Plan::Walk { loops: 1 });
+        // 边界：roll_event 恰好 0.4 不走（严格小于，与原判定一致）
+        assert_eq!(plan_idle_event(&s, 0.4, 0.99, 0), Plan::RandomClip);
+        assert_eq!(plan_idle_event(&s, 0.9, 0.0, 0), Plan::RandomClip);
+        // 无带步幅的 move 片段：Walk 分支整体跳过
+        let s2 = snap(false, false);
+        assert_eq!(plan_idle_event(&s2, 0.1, 0.0, 0), Plan::RandomClip);
+        // 走完直接回 Idle（无转身）
+        assert_eq!(plan_walk_end(&s), Plan::Idle);
+        assert_eq!(plan_walk_end(&s2), Plan::Idle);
+    }
+
+    #[test]
+    fn decisions_with_turn_clips() {
+        let s = snap(true, true);
+        // Idle 穿插：roll_turn < 0.15 → turn 后回 Idle；边界恰好 0.15 不判
+        assert_eq!(
+            plan_idle_event(&s, 0.9, 0.0, 0),
+            Plan::TurnThen(Box::new(Plan::Idle))
+        );
+        assert_eq!(
+            plan_idle_event(&s, 0.9, 0.149, 0),
+            Plan::TurnThen(Box::new(Plan::Idle))
+        );
+        assert_eq!(plan_idle_event(&s, 0.9, 0.15, 0), Plan::RandomClip);
+        // Walk 起步先转身：turn roll 不中 + roll_event < 0.4
+        assert_eq!(
+            plan_idle_event(&s, 0.3, 0.5, 2),
+            Plan::TurnThen(Box::new(Plan::Walk { loops: 3 }))
+        );
+        // 走完先转身再回 Idle
+        assert_eq!(plan_walk_end(&s), Plan::TurnThen(Box::new(Plan::Idle)));
+        // 有 turn 但无可走片段：Walk 分支跳过，穿插不受影响
+        let s2 = snap(true, false);
+        assert_eq!(plan_idle_event(&s2, 0.1, 0.9, 0), Plan::RandomClip);
+        assert_eq!(
+            plan_idle_event(&s2, 0.1, 0.1, 0),
+            Plan::TurnThen(Box::new(Plan::Idle))
+        );
+    }
+
+    // ---------- 两套真实库的快照提取 ----------
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("ds-pet-sched-{tag}-{}-{nanos}", std::process::id()))
+    }
+
+    /// 写一个单帧 zst clip
+    fn write_zst_clip(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let raw = vec![0u8; crate::library::FRAME_BYTES];
+        let z = zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap();
+        std::fs::write(dir.join("clip.zst"), z).unwrap();
+    }
+
+    #[test]
+    fn snapshot_from_two_libraries() {
+        // 库 A：turn + 带步幅 move + random；库 B：无 turn、move 无步幅
+        let root_a = temp_root("with-turn");
+        let frames_a = root_a.join("assets/frames");
+        write_zst_clip(&frames_a.join("idle/待机"));
+        write_zst_clip(&frames_a.join("turn/左转身"));
+        write_zst_clip(&frames_a.join("move/走"));
+        write_zst_clip(&frames_a.join("random/笑"));
+        std::fs::create_dir_all(root_a.join("assets/meta")).unwrap();
+        std::fs::write(
+            root_a.join("assets/meta/move_strides.json"),
+            r#"{"走":{"stride":240,"curve":[0.0,0.5,1.0]}}"#,
+        )
+        .unwrap();
+        let lib_a = Library::load(&root_a.join("assets")).unwrap();
+        let snap_a = sched_snapshot(&lib_a);
+        assert!(snap_a.turn_available);
+        assert!(snap_a.walk_available);
+
+        let root_b = temp_root("no-turn");
+        let frames_b = root_b.join("assets/frames");
+        write_zst_clip(&frames_b.join("idle/待机"));
+        write_zst_clip(&frames_b.join("move/走")); // 无 move_strides.json → 无步幅
+        write_zst_clip(&frames_b.join("random/笑"));
+        let lib_b = Library::load(&root_b.join("assets")).unwrap();
+        let snap_b = sched_snapshot(&lib_b);
+        assert!(!snap_b.turn_available);
+        assert!(!snap_b.walk_available);
+        // 无 turn 库的决策全部走回退路径
+        assert_eq!(plan_idle_event(&snap_b, 0.1, 0.0, 0), Plan::RandomClip);
+        assert_eq!(plan_walk_end(&snap_b), Plan::Idle);
+
+        std::fs::remove_dir_all(&root_a).ok();
+        std::fs::remove_dir_all(&root_b).ok();
+    }
+
+    // ---------- turn 链的迁移与打断 ----------
+
+    fn frames_n(n: usize) -> Arc<ClipFrames> {
+        Arc::new(ClipFrames::from_flat(vec![
+            7u8;
+            n * crate::library::FRAME_BYTES
+        ]))
+    }
+
+    fn first_frame() -> Arc<Frame> {
+        Arc::new(Frame(vec![9u8; crate::library::FRAME_BYTES]))
+    }
+
+    fn clip(id: &str) -> ClipId {
+        ClipId(Arc::from(id))
+    }
+
+    #[test]
+    fn walk_end_via_turn_to_idle() {
+        // 模拟 window 侧执行 plan_walk_end（有 turn）：切 turn 片段 + set_pending(Idle)
+        let mut a = Anim::new(&clip("idle/x"), first_frame(), Some(frames_n(1)));
+        a.set_clip(
+            &clip("turn/左转身"),
+            first_frame(),
+            Some(frames_n(1)),
+            Mode::OneShot,
+            false,
+        );
+        a.set_pending(Plan::Idle);
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR),
+            Tick::Finished
+        ));
+        // window 在 Finished 时取后续计划并执行
+        assert_eq!(a.take_pending(), Some(Plan::Idle));
+        assert_eq!(a.take_pending(), None); // 一次性
+        a.enter_idle(&clip("idle/x"), first_frame(), Some(frames_n(1)));
+        assert!(matches!(a.mode, Mode::Idle));
+    }
+
+    #[test]
+    fn walk_start_via_turn() {
+        let mut a = Anim::new(&clip("idle/x"), first_frame(), Some(frames_n(1)));
+        // window 执行 plan_idle_event = TurnThen(Walk)：先切 turn
+        a.set_clip(
+            &clip("turn/右转身"),
+            first_frame(),
+            Some(frames_n(1)),
+            Mode::OneShot,
+            false,
+        );
+        a.set_pending(Plan::Walk { loops: 2 });
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR),
+            Tick::Finished
+        ));
+        // window 拿到 Walk 计划：切 move 片段进 Walk
+        a.set_clip(
+            &clip("move/走"),
+            first_frame(),
+            Some(frames_n(1)),
+            Mode::Walk {
+                dir: WalkDir::Right,
+                remaining_loops: 2,
+            },
+            true,
+        );
+        assert!(matches!(a.mode, Mode::Walk { .. }));
+        // 走完一圈：window 递减圈数（非 0 继续）
+        assert!(matches!(
+            a.tick(t0 + crate::library::FRAME_DUR * 2),
+            Tick::WalkLoopDone
+        ));
+    }
+
+    #[test]
+    fn clip_switch_cancels_pending() {
+        let mut a = Anim::new(&clip("idle/x"), first_frame(), Some(frames_n(1)));
+        a.set_pending(Plan::Idle);
+        // 拖拽/点击等任何切换都会使 pending 失效
+        a.set_clip(
+            &clip("drag/抓"),
+            first_frame(),
+            Some(frames_n(1)),
+            Mode::Drag,
+            false,
+        );
+        assert_eq!(a.take_pending(), None);
+        a.set_pending(Plan::Walk { loops: 1 });
+        a.enter_idle(&clip("idle/x"), first_frame(), Some(frames_n(1)));
+        assert_eq!(a.take_pending(), None);
     }
 }
