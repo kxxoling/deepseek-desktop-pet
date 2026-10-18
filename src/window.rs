@@ -348,6 +348,15 @@ impl PetWindow {
         self.anim.set_clip(id, first, frames, mode, mirrored);
     }
 
+    /// 触发播放特殊片段（受理规则见动画状态机）
+    pub fn trigger_clip(&mut self, spec: &str) -> bool {
+        let accepted = self.anim.trigger_clip(spec);
+        if accepted {
+            self.blit();
+        }
+        accepted
+    }
+
     fn enter_idle(&mut self) {
         if let Some(idle) = self.lib.find_idle() {
             let idle = idle.clone();
