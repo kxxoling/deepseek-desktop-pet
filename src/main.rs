@@ -14,6 +14,7 @@ mod config;
 mod input;
 mod library;
 mod logging;
+mod physics;
 mod platform;
 mod render;
 mod tray;
