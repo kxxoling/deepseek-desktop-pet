@@ -457,7 +457,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(WindowRequest::ShowMenu(x, y)) = self.pets[pos].on_window_event(&event)
                 {
                     self.menu_target = Some(window_id);
+                    // 宠物是置顶层，会盖住菜单与它重叠的行并吃掉那里的点击；弹出期间临时降到普通层级，菜单关闭后恢复
+                    self.pets[pos]
+                        .window
+                        .set_window_level(winit::window::WindowLevel::Normal);
                     platform::show_context_menu(&self.ctx_menu, &self.pets[pos].window, x, y);
+                    self.pets[pos]
+                        .window
+                        .set_window_level(winit::window::WindowLevel::AlwaysOnTop);
                 }
             }
         }
