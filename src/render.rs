@@ -72,6 +72,25 @@ pub fn rotate_into(dst: &mut [u8], src: &[u8], angle_deg: f64, center: (f64, f64
     }
 }
 
+/// 回旋起始角速度（度/秒）
+pub const SPIN_START: f64 = 240.0;
+/// 每次菜单触发对角速度的放大倍数
+pub const SPIN_ACCEL: f64 = 1.8;
+/// 角速度上限（度/秒，约每秒三圈）
+pub const SPIN_MAX: f64 = 1080.0;
+/// 角速度每秒的衰减比例（摩擦）
+pub const SPIN_DECAY_PER_S: f64 = 0.5;
+/// 低于此角速度停止回旋（度/秒）
+pub const SPIN_STOP: f64 = 30.0;
+
+/// 触发一次回旋后的角速度：第一次从起步值开始，连续触发会加速，到上限封顶
+pub fn spin_next_omega(current: Option<f64>) -> f64 {
+    match current {
+        None => SPIN_START,
+        Some(o) => (o * SPIN_ACCEL).min(SPIN_MAX),
+    }
+}
+
 const SHADER: &str = r"
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -643,5 +662,24 @@ mod squash_tests {
             let s = squash_scale(t(i));
             assert!((0.65..=1.0).contains(&s), "t={} s={}", t(i), s);
         }
+    }
+}
+
+#[cfg(test)]
+mod spin_tests {
+    use super::*;
+
+    #[test]
+    fn spin_omega_ladder() {
+        let o0 = spin_next_omega(None);
+        assert_eq!(o0, SPIN_START);
+        let o1 = spin_next_omega(Some(o0));
+        assert_eq!(o1, SPIN_START * SPIN_ACCEL);
+        // 连续触发封顶
+        let mut o = o1;
+        for _ in 0..10 {
+            o = spin_next_omega(Some(o));
+        }
+        assert_eq!(o, SPIN_MAX);
     }
 }
