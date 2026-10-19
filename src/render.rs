@@ -91,6 +91,18 @@ pub fn spin_next_omega(current: Option<f64>) -> f64 {
     }
 }
 
+/// 撞飞倾斜的最大角度（度）
+pub const KNOCK_MAX_TILT: f64 = 45.0;
+/// 被撞飞的宠物落稳后，停在屏幕边缘时重新进入探头姿态要等待的秒数
+pub const KNOCK_REPROBE_SECS: f64 = 5.0;
+/// 撞飞倾斜的参考水平速度（px/s，达到这个速度就倾斜到最大角度）
+pub const KNOCK_REF_VX: f64 = 600.0;
+
+/// 被撞飞时的身体倾角：随水平速度的方向倾斜，速度低时趋于零
+pub fn knock_tilt_of(vx: f64) -> f64 {
+    (vx / KNOCK_REF_VX * KNOCK_MAX_TILT).clamp(-KNOCK_MAX_TILT, KNOCK_MAX_TILT)
+}
+
 const SHADER: &str = r"
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -681,5 +693,20 @@ mod spin_tests {
             o = spin_next_omega(Some(o));
         }
         assert_eq!(o, SPIN_MAX);
+    }
+}
+
+#[cfg(test)]
+mod knock_tests {
+    use super::*;
+
+    #[test]
+    fn knock_tilt_scales_and_clamps() {
+        assert_eq!(knock_tilt_of(0.0), 0.0);
+        assert_eq!(knock_tilt_of(KNOCK_REF_VX), KNOCK_MAX_TILT);
+        assert_eq!(knock_tilt_of(-KNOCK_REF_VX), -KNOCK_MAX_TILT);
+        // 超过参考速度封顶；低速按比例
+        assert_eq!(knock_tilt_of(KNOCK_REF_VX * 10.0), KNOCK_MAX_TILT);
+        assert_eq!(knock_tilt_of(KNOCK_REF_VX / 2.0), KNOCK_MAX_TILT / 2.0);
     }
 }
