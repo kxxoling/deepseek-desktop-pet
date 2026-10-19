@@ -38,6 +38,11 @@ impl BodyBox {
         x1: 214.0,
         y1: 165.0,
     };
+
+    /// 中心点（帧内坐标），旋转等姿态渲染用
+    pub fn center(&self) -> (f64, f64) {
+        (self.x0.midpoint(self.x1), self.y0.midpoint(self.y1))
+    }
 }
 
 /// 宠物运动状态

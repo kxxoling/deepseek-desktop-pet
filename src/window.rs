@@ -73,6 +73,10 @@ pub struct PetWindow {
     /// 窗口整体不透明度（Windows 提交分层窗口时随帧携带；macOS 一次设置即持续生效）
     #[cfg(target_os = "windows")]
     opacity: f64,
+    /// 探头姿态：倾角与进入时刻（None = 非探头）
+    probe: Option<(f64, Instant)>,
+    /// 旋转渲染的输出缓冲
+    rotate_scratch: Vec<u8>,
     /// 最近一次交互时刻（省电判定用）
     last_interaction: Instant,
     /// 锁定位置：不受理拖拽（点击/双击不受影响，config `lock_position`）
@@ -191,6 +195,8 @@ impl PetWindow {
             walk_last_curve: 0.0,
             #[cfg(target_os = "windows")]
             opacity,
+            probe: None,
+            rotate_scratch: vec![0u8; FRAME_BYTES],
             last_interaction: Instant::now(),
             lock_position: crate::config::get_bool("lock_position").unwrap_or(false),
             shift_drag_only: crate::config::get_bool("shift_drag_only").unwrap_or(false),
@@ -224,13 +230,35 @@ impl PetWindow {
             let scale = crate::render::squash_scale(t);
             if scale < 1.0 {
                 squash_into(&mut self.squash_scratch, src, scale);
-                self.surface.upload(&self.gpu, &self.squash_scratch);
+                // 探头姿态下压缩结果再整体倾斜
+                if let Some((angle, _)) = self.probe {
+                    crate::render::rotate_into(
+                        &mut self.rotate_scratch,
+                        &self.squash_scratch,
+                        angle,
+                        crate::physics::BodyBox::DEFAULT.center(),
+                    );
+                    self.surface.upload(&self.gpu, &self.rotate_scratch);
+                } else {
+                    self.surface.upload(&self.gpu, &self.squash_scratch);
+                }
                 self.window.request_redraw();
                 return;
             }
             self.squash_start = None;
         }
-        self.surface.upload(&self.gpu, src);
+        // 探头姿态：整帧绕身体中心倾斜
+        if let Some((angle, _)) = self.probe {
+            crate::render::rotate_into(
+                &mut self.rotate_scratch,
+                src,
+                angle,
+                crate::physics::BodyBox::DEFAULT.center(),
+            );
+            self.surface.upload(&self.gpu, &self.rotate_scratch);
+        } else {
+            self.surface.upload(&self.gpu, src);
+        }
         self.window.request_redraw();
     }
 
@@ -569,7 +597,17 @@ impl PetWindow {
             self.anim.on_clip_loaded(&id, frames);
         }
 
-        if matches!(self.anim.mode, Mode::Idle) && now >= self.anim.next_event_at {
+        // 探头期间拦住随机游走（上游的教训：不拦的话宠物会挂着探头被平移出屏），到时自动退回；不在探头姿态才允许随机事件
+        if let Some((_, since)) = self.probe
+            && now.duration_since(since).as_secs_f64() >= crate::render::PROBE_RETREAT_SECS
+        {
+            self.probe = None;
+            self.blit();
+        }
+        if self.probe.is_none()
+            && matches!(self.anim.mode, Mode::Idle)
+            && now >= self.anim.next_event_at
+        {
             self.fire_random_event();
         }
 
@@ -734,7 +772,24 @@ impl PetWindow {
             if action == Action::Click {
                 self.velocity = (0.0, 0.0); // 单击不走惯性
             }
-            // 否则保持 Mode::Drag，速度交给物理世界飞行，落稳后由物理侧收尾回 Idle
+            // 贴着屏幕左右边缘松手：进入探头姿态，清掉速度不再飞出
+            if action != Action::Click
+                && let Some((x, _y)) = self.window_pos_logical()
+                && let Some(m) = self.window.current_monitor()
+            {
+                let scale = m.scale_factor();
+                let size: LogicalSize<f64> = m.size().to_logical(scale);
+                if let Some(angle) = crate::render::probe_angle_at(x, WIN_W, size.width) {
+                    self.probe = Some((angle, Instant::now()));
+                    self.velocity = (0.0, 0.0);
+                    self.blit();
+                }
+            }
+            // 其余情况保持 Mode::Drag，速度交给物理世界飞行，落稳后由物理侧收尾回 Idle
+        }
+        // 探头中点击一下即拉直
+        if action == Action::Click && self.probe.take().is_some() {
+            self.blit();
         }
         // 锁定/仅 SHIFT 模式下没有拖拽也照常播点击动画
         if action == Action::Click {

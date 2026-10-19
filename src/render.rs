@@ -24,6 +24,54 @@ pub fn squash_scale(t_ms: f64) -> f64 {
     1.0 - 0.35 * env * osc
 }
 
+/// 探头姿态角（度）：身体探出屏幕边缘时的倾斜幅度
+pub const PROBE_ANGLE_DEG: f64 = 45.0;
+/// 探头自动退回的时长（秒）
+pub const PROBE_RETREAT_SECS: f64 = 5.0;
+/// 松手时距屏幕左右边缘多近才进入探头（逻辑点）
+pub const PROBE_EDGE_MARGIN: f64 = 40.0;
+
+/// 松手时按窗口与屏幕边缘的关系决定是否进入探头。
+/// 返回姿态角：靠近左边缘时为 -45°（身体向左倾），靠近右边缘时为 +45°，不在边缘附近返回 None
+pub fn probe_angle_at(win_x: f64, win_w: f64, screen_w: f64) -> Option<f64> {
+    let left_gap = win_x;
+    let right_gap = screen_w - (win_x + win_w);
+    if left_gap <= PROBE_EDGE_MARGIN && left_gap <= right_gap {
+        Some(-PROBE_ANGLE_DEG)
+    } else if right_gap <= PROBE_EDGE_MARGIN {
+        Some(PROBE_ANGLE_DEG)
+    } else {
+        None
+    }
+}
+
+/// 把整帧绕 `center` 旋转 `angle_deg` 后写入 dst（屏幕坐标 y 向下，正角为顺时针）。
+/// 采样时反向旋转取源图的最近像素，超出源图范围的像素保持透明
+pub fn rotate_into(dst: &mut [u8], src: &[u8], angle_deg: f64, center: (f64, f64)) {
+    const W: usize = FRAME_W as usize;
+    const H: usize = FRAME_H as usize;
+    let rad = angle_deg.to_radians();
+    let (cos, sin) = (rad.cos(), rad.sin());
+    for y in 0..H {
+        for x in 0..W {
+            let dx = f64::from(x as u16) - center.0;
+            let dy = f64::from(y as u16) - center.1;
+            let sx = center.0 + dx * cos + dy * sin;
+            let sy = center.1 - dx * sin + dy * cos;
+            let d = (y * W + x) * 4;
+            if (0.0..W as f64).contains(&sx) && (0.0..H as f64).contains(&sy) {
+                let s = ((sy as usize) * W + sx as usize) * 4;
+                dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
+            } else {
+                dst[d] = 0;
+                dst[d + 1] = 0;
+                dst[d + 2] = 0;
+                dst[d + 3] = 0;
+            }
+        }
+    }
+}
+
 const SHADER: &str = r"
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
