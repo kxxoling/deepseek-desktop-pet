@@ -10,6 +10,7 @@
 
 mod anim;
 mod assets;
+mod audio;
 mod autostart;
 mod character;
 mod config;
@@ -993,6 +994,7 @@ fn main() {
     }
     // 启动时就加载配置，坏文件尽早暴露
     log::info!("配置文件：{}", config::init().display());
+    audio::init();
 
     let builtin_root = assets::locate_assets_root();
     let characters: Vec<character::Character> =
