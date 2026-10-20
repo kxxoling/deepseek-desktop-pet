@@ -1,4 +1,4 @@
-//! 帧库：clip 索引 + 首帧常驻缓存 + 活跃 clip 懒加载。
+//! `Library`：clip 索引 + 首帧常驻缓存 + 活跃 clip 懒加载。
 //!
 //! 全量帧解码后约 3.6GB，禁止整包载入：启动只缓存各 clip 首帧（约 24MB），
 //! 活跃 clip 后台加载、多窗共享 Arc、引用计数驱逐（最后一个窗口切走即释放）。
@@ -295,7 +295,7 @@ fn parse_meta(meta_dir: &Path) -> MetaInfo {
 }
 
 impl Library {
-    /// 加载帧库：扫描索引 + 全部首帧常驻 + 元数据。找不到任何 clip 返回 Err。
+    /// 加载 `Library`：扫描索引 + 全部首帧常驻 + 元数据。找不到任何 clip 返回 Err。
     pub fn load(assets_root: &Path) -> Result<Self, String> {
         let frames_root = assets_root.join("frames");
         if !frames_root.is_dir() {
@@ -315,7 +315,7 @@ impl Library {
         let zst_count = clips.iter().filter(|c| c.zst.is_some()).count();
         let png_frames: usize = clips.iter().map(|c| c.frame_count()).sum();
         log::info!(
-            "帧库索引：{} 个 clip（zst 快加载 {zst_count} 个，PNG 回退 {} 帧）",
+            "Library 索引：{} 个 clip（zst 快加载 {zst_count} 个，PNG 回退 {} 帧）",
             clips.len(),
             png_frames
         );
@@ -381,7 +381,7 @@ impl Library {
         self.no_mirror.contains(name)
     }
 
-    /// 取活跃帧集；未加载则返回 None 并触发后台加载，完成后调用 `notify`
+    /// 取该 clip 活跃的 `ClipFrames`；未加载则返回 None 并触发后台加载，完成后调用 `notify`
     pub fn get_or_load(
         &self,
         id: &ClipId,
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn 帧库扫描_首帧缓存_元数据解析() {
+    fn scan_caches_first_frames_and_parses_meta() {
         let root = temp_root("lib");
         let frames = root.join("assets/frames");
         std::fs::create_dir_all(frames.join("idle/呼吸")).unwrap();

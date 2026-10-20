@@ -1,6 +1,6 @@
 //! ds-pet：跨平台桌宠（纯 Rust，winit 0.30 + pixels/wgpu + png 帧序列）
 //!
-//! 架构：数据（帧库/状态机）与窗口分离，帧库全局共享、多窗引用同一份解码缓存。
+//! 架构：数据（`Library`/状态机）与窗口分离，`Library` 全局共享、多窗引用同一份解码缓存。
 //! 详见 AGENTS.md / PROMPT.md。
 
 #![cfg_attr(
@@ -81,7 +81,7 @@ struct App {
     spawned_initial: bool,
     /// idle 片段 id（ClipLoaded 到达时比对）
     idle_clip: Option<ClipId>,
-    /// idle 帧集常驻（持强引用防驱逐，避免每次回待机重新解码）
+    /// 常驻的 idle `ClipFrames`（持强引用防驱逐，避免每次回待机重新解码）
     idle_frames: Option<Arc<ClipFrames>>,
 }
 
@@ -891,7 +891,7 @@ fn main() {
         None
     };
 
-    // idle 帧集常驻（持强引用防缓存驱逐）
+    // 常驻的 idle `ClipFrames`（持强引用防缓存驱逐）
     let idle_clip = lib.find_idle();
     let idle_frames = idle_clip
         .as_ref()

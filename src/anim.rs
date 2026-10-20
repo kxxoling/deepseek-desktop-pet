@@ -105,7 +105,7 @@ pub enum Tick {
 pub struct Anim {
     pub mode: Mode,
     pub clip: ClipId,
-    /// 完整帧集（未加载完成时为 None，用 first 兜底显示）
+    /// 该片段的完整 `ClipFrames`（未加载完成时为 None，用 first 兜底显示）
     pub frames: Option<Arc<ClipFrames>>,
     pub first: Arc<Frame>,
     pub frame_idx: usize,
@@ -116,7 +116,7 @@ pub struct Anim {
     next_frame_at: Option<Instant>,
     /// 下次随机事件时刻（仅 Idle 态有效）
     pub next_event_at: Instant,
-    /// 后台加载中的目标 clip（到货即从当前帧集切过去）
+    /// 后台加载中的目标 clip（到货即切到它的 `ClipFrames`）
     queued: Option<ClipId>,
     /// 单次片段播完后的后续计划；切片段即作废
     pending: Option<Plan>,
@@ -145,7 +145,7 @@ pub struct SchedSnapshot {
     pub walk_available: bool,
 }
 
-/// 从帧库提取调度快照
+/// 从 `Library` 提取调度快照
 pub fn sched_snapshot(lib: &Library) -> SchedSnapshot {
     SchedSnapshot {
         turn_available: !lib.clips_in_category("turn").is_empty(),
@@ -1055,7 +1055,7 @@ mod trigger_tests {
 
     #[test]
     fn acceptance_matrix() {
-        // 待机时立即受理：切到单次播放，帧集排队加载，先显示选中的首帧
+        // 待机时立即受理：切到单次播放，`ClipFrames` 排队加载，先显示选中的首帧
         let mut a = anim_with_events(Mode::Idle);
         assert!(a.trigger_clip("events"));
         assert!(matches!(a.mode, Mode::OneShot));

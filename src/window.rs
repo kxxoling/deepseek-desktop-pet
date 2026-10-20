@@ -446,7 +446,7 @@ impl PetWindow {
 
     // ---------- 状态机驱动 ----------
 
-    /// 经帧库切换片段（含懒加载触发与首帧兜底）
+    /// 经 `Library` 切换片段（含懒加载触发与首帧兜底）
     fn switch_clip(&mut self, id: &ClipId, mode: Mode, mirrored: bool) {
         let first = self.lib.first_frame(id).cloned().expect("首帧缓存缺失");
         let frames = self.lib.get_or_load(id, crate::clip_loader(&self.proxy));
