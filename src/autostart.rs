@@ -376,15 +376,19 @@ X-GNOME-Autostart-enabled=true
     }
 
     // 文件路径生成（macOS 口径）
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn entry_path_under_launchagents() {
+    fn entry_path_matches_platform_convention() {
         let p = entry_path();
-        assert!(
-            p.ends_with("Library/LaunchAgents/com.ds-pet.plist"),
-            "{}",
-            p.display()
-        );
+        if cfg!(target_os = "macos") {
+            assert!(
+                p.ends_with("Library/LaunchAgents/com.ds-pet.plist"),
+                "{}",
+                p.display()
+            );
+        } else {
+            assert!(p.ends_with("ds-pet.desktop"), "{}", p.display());
+        }
     }
 
     // 幂等与清理的文件级行为（macOS 本机跑；CI 的 linux 走 cfg 分支同构）
