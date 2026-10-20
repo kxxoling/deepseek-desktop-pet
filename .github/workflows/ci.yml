@@ -58,7 +58,7 @@ jobs:
       - name: Install ffmpeg and zstd
         run: sudo apt-get update && sudo apt-get install -y ffmpeg zstd
       - name: Transcode with ffmpeg (keying, 320x180@15fps RGBA, zstd)
-        run: scripts/preprocess_assets.sh 8
+        run: scripts/preprocess_assets.sh
       - name: Package
         run: tar -cf assets.tar assets
       - uses: actions/upload-artifact@v7
