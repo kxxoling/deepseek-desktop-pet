@@ -63,6 +63,8 @@ struct App {
     current_character: String,
     /// 全部桌宠当前是否隐藏；隐藏时不播动画、不算物理
     pets_hidden: bool,
+    /// 全屏自动隐藏的上次检测时刻（2 秒轮询一次）
+    fullscreen_check_at: Instant,
     gpu: Arc<render::Gpu>,
     proxy: EventLoopProxy<UserEvent>,
     pets: Vec<PetWindow>,
@@ -907,6 +909,20 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        // 每 2 秒检测一次全屏，有应用全屏时自动隐藏，退出全屏后恢复
+        // （只做显示/隐藏切换，不覆盖用户手动隐藏的状态）
+        if now.duration_since(self.fullscreen_check_at).as_secs_f64() >= 2.0 {
+            self.fullscreen_check_at = now;
+            let fullscreen = platform::any_app_fullscreen();
+            if fullscreen && !self.pets_hidden {
+                self.toggle_pets_visible();
+                log::info!("检测到全屏应用，自动隐藏桌宠");
+            } else if !fullscreen && self.pets_hidden {
+                self.toggle_pets_visible();
+                log::info!("全屏应用退出，恢复桌宠显示");
+            }
+        }
+
         // 隐藏时不播动画、不算物理，只保留菜单能点
         let mut deadline = now + POLL_TICK;
         if !self.pets_hidden {
@@ -1106,6 +1122,7 @@ fn main() {
         characters: entries,
         current_character: current,
         pets_hidden: false,
+        fullscreen_check_at: Instant::now(),
         gpu,
         proxy,
         pets: Vec::new(),
