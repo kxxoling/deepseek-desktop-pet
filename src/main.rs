@@ -46,6 +46,10 @@ pub enum UserEvent {
 
 struct App {
     lib: Arc<Library>,
+    /// 可用角色（内置 + 外部目录）
+    characters: Vec<CharacterEntry>,
+    /// 当前角色 id（config `character`，缺省内置）
+    current_character: String,
     gpu: Arc<render::Gpu>,
     proxy: EventLoopProxy<UserEvent>,
     pets: Vec<PetWindow>,
@@ -78,6 +82,8 @@ const MENU_EXIT: &str = "app.exit";
 const MENU_AUTOSTART: &str = "app.autostart";
 /// 触发片段的菜单项 ID 前缀，后面接类名或「类/子分类」
 const MENU_ANIM_PREFIX: &str = "app.anim.";
+/// 角色切换菜单项 ID 前缀，后面接角色 id
+const MENU_CHAR_PREFIX: &str = "app.char.";
 
 /// 菜单项定义（纯数据，加菜单项就是往表里加一行）；muda 菜单构建必须在主线程
 #[allow(dead_code)]
@@ -113,8 +119,14 @@ fn check(id: &str, label: &str, checked: bool) -> MenuItemDef {
 }
 
 /// 右键菜单；events 类有子分类时，追加「动画」子菜单逐项触发
-fn context_menu_defs(subs: &[String], autostart_on: bool) -> Vec<MenuItemDef> {
+fn context_menu_defs(
+    subs: &[String],
+    autostart_on: bool,
+    chars: &[CharacterEntry],
+    current: &str,
+) -> Vec<MenuItemDef> {
     let mut defs = base_context_defs(autostart_on);
+    append_character_submenu(&mut defs, chars, current);
     if !subs.is_empty() {
         let children = subs
             .iter()
@@ -142,13 +154,47 @@ fn base_context_defs(autostart_on: bool) -> Vec<MenuItemDef> {
 }
 
 /// 托盘菜单（无「关闭这只」：托盘不指向具体窗口）
-fn tray_menu_defs(autostart_on: bool) -> Vec<MenuItemDef> {
-    vec![
+fn tray_menu_defs(autostart_on: bool, chars: &[CharacterEntry], current: &str) -> Vec<MenuItemDef> {
+    let mut defs = vec![
         item(MENU_NEW, "新增一只"),
         item(MENU_LOGS, "打开日志文件夹"),
         check(MENU_AUTOSTART, "开机自启", autostart_on),
         item(MENU_EXIT, "退出"),
-    ]
+    ];
+    append_character_submenu(&mut defs, chars, current);
+    defs
+}
+
+/// 菜单里使用的角色条目：把角色发现的结果整理成纯数据，让菜单构建保持无副作用
+struct CharacterEntry {
+    id: String,
+    display_name: String,
+}
+
+/// 有多个角色时在「退出」前插入「角色」子菜单，当前角色带「✓」前缀
+fn append_character_submenu(defs: &mut Vec<MenuItemDef>, chars: &[CharacterEntry], current: &str) {
+    if chars.len() < 2 {
+        return;
+    }
+    let children = chars
+        .iter()
+        .map(|c| {
+            // 当前角色用「✓」前缀标记（勾选组件的点击事件在弹出菜单里不可靠，改用普通项）
+            let label = if c.id == current {
+                format!("✓ {}", c.display_name)
+            } else {
+                c.display_name.clone()
+            };
+            item(&format!("{MENU_CHAR_PREFIX}{}", c.id), &label)
+        })
+        .collect::<Vec<_>>();
+    defs.insert(
+        defs.len() - 1,
+        MenuItemDef::Submenu {
+            label: "角色".to_string(),
+            children,
+        },
+    );
 }
 
 /// events 类下的子分类名，去重排序；直接放在 events/ 下的片段不算子分类
@@ -226,12 +272,26 @@ fn build_menu(defs: &[MenuItemDef]) -> muda::Result<muda::Menu> {
     Ok(menu)
 }
 
-fn build_context_menu(lib: &Library, autostart_on: bool) -> muda::Result<muda::Menu> {
-    build_menu(&context_menu_defs(&events_subcategories(lib), autostart_on))
+fn build_context_menu(
+    lib: &Library,
+    autostart_on: bool,
+    chars: &[CharacterEntry],
+    current: &str,
+) -> muda::Result<muda::Menu> {
+    build_menu(&context_menu_defs(
+        &events_subcategories(lib),
+        autostart_on,
+        chars,
+        current,
+    ))
 }
 
-fn build_tray_menu(autostart_on: bool) -> muda::Result<muda::Menu> {
-    build_menu(&tray_menu_defs(autostart_on))
+fn build_tray_menu(
+    autostart_on: bool,
+    chars: &[CharacterEntry],
+    current: &str,
+) -> muda::Result<muda::Menu> {
+    build_menu(&tray_menu_defs(autostart_on, chars, current))
 }
 
 fn build_tray(
@@ -305,6 +365,67 @@ fn monitor_bounds(mon: Option<winit::monitor::MonitorHandle>) -> physics::Bounds
 }
 
 impl App {
+    /// 切换角色：重新加载该角色的 `Library` 并对所有窗口生效，同时更新托盘图标和菜单里的当前角色标记，并记住这次的选择
+    fn switch_character(&mut self, char_id: &str) {
+        if char_id == self.current_character {
+            return;
+        }
+        if !self.characters.iter().any(|c| c.id == char_id) {
+            log::warn!("未知角色：{char_id}");
+            return;
+        }
+        let root = entry_root(char_id).unwrap_or_else(assets::locate_assets_root);
+        let new_lib = match Library::load(&root) {
+            Ok(l) => Arc::new(l),
+            Err(e) => {
+                log::error!("角色资产加载失败（{char_id}）：{e}");
+                return;
+            }
+        };
+
+        // 常驻的 idle `ClipFrames`（持引用防缓存驱逐）随角色切换重新绑定到新角色
+        let idle_clip = new_lib.find_idle();
+        let idle_frames = idle_clip
+            .as_ref()
+            .and_then(|id| new_lib.get_or_load(id, clip_loader(&self.proxy)));
+        self.idle_clip = idle_clip;
+        self.idle_frames = idle_frames;
+
+        self.current_character = char_id.to_string();
+        config::set("character", char_id);
+        let lib = new_lib.clone();
+        for pet in &mut self.pets {
+            pet.switch_library(lib.clone());
+        }
+        self.lib = lib;
+
+        // 托盘图标换成新角色 idle 首帧
+        if let Some(tray) = &self.tray
+            && let Some(idle) = self.lib.find_idle()
+            && let Some(frame) = self.lib.first_frame(&idle)
+        {
+            let icon = tray::tray_icon_from_frame(&frame.0);
+            let _ = tray.set_icon(Some(icon));
+        }
+        // 重建两处菜单，刷新里面的当前角色标记
+        let autostart_on = autostart::is_enabled();
+        if let Ok(menu) = build_context_menu(
+            &self.lib,
+            autostart_on,
+            &self.characters,
+            &self.current_character,
+        ) {
+            self.ctx_menu = std::rc::Rc::new(menu);
+        }
+        if let Some(tray) = &self.tray
+            && let Ok(menu) =
+                build_tray_menu(autostart_on, &self.characters, &self.current_character)
+        {
+            tray.set_menu(Some(Box::new(menu)));
+        }
+        log::info!("已切换角色：{char_id}");
+    }
+
     fn spawn_pet(&mut self, event_loop: &ActiveEventLoop, at: Option<(f64, f64)>) {
         if self.pets.len() >= MAX_PETS {
             log::warn!("窗口数量已达上限 {MAX_PETS}，忽略新增请求");
@@ -363,11 +484,13 @@ impl App {
             return;
         }
         let on = autostart::is_enabled();
-        if let Ok(menu) = build_context_menu(&self.lib, on) {
+        if let Ok(menu) =
+            build_context_menu(&self.lib, on, &self.characters, &self.current_character)
+        {
             self.ctx_menu = std::rc::Rc::new(menu);
         }
         if let Some(tray) = &self.tray
-            && let Ok(menu) = build_tray_menu(on)
+            && let Ok(menu) = build_tray_menu(on, &self.characters, &self.current_character)
         {
             tray.set_menu(Some(Box::new(menu)));
         }
@@ -385,6 +508,9 @@ impl App {
             MENU_LOGS => open_in_file_manager(&logging::log_dir()),
             MENU_AUTOSTART => self.toggle_autostart(),
             MENU_EXIT => event_loop.exit(),
+            _ if let Some(char_id) = id.strip_prefix(MENU_CHAR_PREFIX) => {
+                self.switch_character(char_id);
+            }
             _ if let Some(spec) = id.strip_prefix(MENU_ANIM_PREFIX) => {
                 let _ = self
                     .proxy
@@ -526,6 +652,15 @@ impl App {
     }
 }
 
+/// 角色的资产目录：内置角色用仓库里的 assets，外部角色放在系统的角色目录下
+fn entry_root(char_id: &str) -> Option<std::path::PathBuf> {
+    if char_id == character::BUILTIN_CHARACTER_ID {
+        return Some(assets::locate_assets_root());
+    }
+    let root = character::external_characters_root().join(char_id);
+    root.join("frames").is_dir().then_some(root)
+}
+
 /// 构建标识：版本 + profile + commit 短哈希（哈希由 build.rs 从 git 注入）
 pub fn build_info() -> String {
     let profile = if cfg!(debug_assertions) {
@@ -549,7 +684,30 @@ fn main() {
     // 启动时就加载配置，坏文件尽早暴露
     log::info!("配置文件：{}", config::init().display());
 
-    let root = assets::locate_assets_root();
+    let builtin_root = assets::locate_assets_root();
+    let characters: Vec<character::Character> =
+        character::discover_characters(&builtin_root, &character::external_characters_root());
+    // 优先用上次选择的角色；它已不存在时回退到内置角色
+    let remembered = config::get_str("character");
+    let current = remembered
+        .as_deref()
+        .filter(|id| characters.iter().any(|c| c.id == *id))
+        .map_or_else(
+            || character::BUILTIN_CHARACTER_ID.to_string(),
+            str::to_string,
+        );
+    let root = characters
+        .iter()
+        .find(|c| c.id == current)
+        .map(|c| c.root.clone())
+        .unwrap_or(builtin_root);
+    let entries: Vec<CharacterEntry> = characters
+        .iter()
+        .map(|c| CharacterEntry {
+            id: c.id.clone(),
+            display_name: c.meta.display_name.clone(),
+        })
+        .collect();
     let lib = match Library::load(&root) {
         Ok(l) => Arc::new(l),
         Err(e) => {
@@ -574,10 +732,11 @@ fn main() {
     let proxy = event_loop.create_proxy();
 
     autostart::cleanup_stale();
+    let autostart_on = autostart::is_enabled();
     let ctx_menu = std::rc::Rc::new(
-        build_context_menu(&lib, autostart::is_enabled()).expect("右键菜单创建失败"),
+        build_context_menu(&lib, autostart_on, &entries, &current).expect("右键菜单创建失败"),
     );
-    let tray_menu = build_tray_menu(autostart::is_enabled()).expect("托盘菜单创建失败");
+    let tray_menu = build_tray_menu(autostart_on, &entries, &current).expect("托盘菜单创建失败");
     let icon = lib
         .find_idle()
         .and_then(|id| lib.first_frame(&id))
@@ -602,6 +761,8 @@ fn main() {
     );
     let mut app = App {
         lib,
+        characters: entries,
+        current_character: current,
         gpu,
         proxy,
         pets: Vec::new(),
@@ -644,7 +805,10 @@ mod tests {
 
     #[test]
     fn menu_ids_unique_and_nonempty() {
-        for defs in [base_context_defs(true), tray_menu_defs(false)] {
+        for defs in [
+            base_context_defs(true),
+            tray_menu_defs(false, &[], "shenshen"),
+        ] {
             let mut ids = Vec::new();
             collect_ids(&defs, &mut ids);
             assert_ne!(ids, [] as [&'static str; 0]);
@@ -662,7 +826,7 @@ mod tests {
         let ctx_defs = base_context_defs(false);
         let mut ctx = Vec::new();
         collect_ids(&ctx_defs, &mut ctx);
-        let tray_defs = tray_menu_defs(false);
+        let tray_defs = tray_menu_defs(false, &[], "shenshen");
         let mut tray = Vec::new();
         collect_ids(&tray_defs, &mut tray);
         // 右键五项、托盘四项（各含「开机自启」勾选项）；「关闭这只」只在右键
@@ -737,6 +901,58 @@ mod tests {
         assert_eq!(parse_pos_env(), None);
     }
 
+    fn char_entry(id: &str, name: &str) -> CharacterEntry {
+        CharacterEntry {
+            id: id.to_string(),
+            display_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn character_submenu_only_with_multiple() {
+        // 单角色不出现子菜单，结构不变（右键5项、托盘4项，各含自启勾选）
+        let one = [char_entry("shenshen", "shenshen")];
+        assert_eq!(context_menu_defs(&[], false, &one, "shenshen").len(), 5);
+        assert_eq!(tray_menu_defs(false, &one, "shenshen").len(), 4);
+        // 双角色：在「退出」前插入「角色」子菜单，当前角色的一项带「✓」前缀
+        let two = [
+            char_entry("shenshen", "申申"),
+            char_entry("test", "测试角色"),
+        ];
+        let defs = context_menu_defs(&[], false, &two, "test");
+        // 顺序：新增/关闭/日志/自启/角色/退出
+        let MenuItemDef::Submenu { label, children } = &defs[4] else {
+            panic!("第五项应为角色子菜单");
+        };
+        assert_eq!(label, "角色");
+        assert_eq!(children.len(), 2);
+        let MenuItemDef::Item { id, label } = &children[0] else {
+            panic!("角色子项应为普通项");
+        };
+        assert_eq!(id, "app.char.shenshen");
+        assert_eq!(label, "申申");
+        let MenuItemDef::Item { label, .. } = &children[1] else {
+            unreachable!();
+        };
+        assert_eq!(label, "✓ 测试角色");
+        assert_eq!(defs.len(), 6);
+    }
+
+    #[test]
+    fn remembered_character_falls_back_to_builtin() {
+        // 决策逻辑与启动处一致：记住的角色不在列表内时回退到内置角色
+        let ids = ["shenshen".to_string()];
+        let remembered = Some("gone".to_string());
+        let current = remembered
+            .as_deref()
+            .filter(|id| ids.iter().any(|c| c == *id))
+            .map_or_else(
+                || character::BUILTIN_CHARACTER_ID.to_string(),
+                str::to_string,
+            );
+        assert_eq!(current, character::BUILTIN_CHARACTER_ID);
+    }
+
     #[test]
     fn events_subcategories_dedup_and_sort() {
         let ids = [
@@ -751,7 +967,7 @@ mod tests {
 
     #[test]
     fn anim_submenu_appends_and_prefixes() {
-        let defs = context_menu_defs(&["balance".to_string()], false);
+        let defs = context_menu_defs(&["balance".to_string()], false, &[], "shenshen");
         // 基础五项之上插入「动画」子菜单
         assert_eq!(defs.len(), 6);
         let MenuItemDef::Submenu { label, children } = &defs[2] else {
@@ -764,6 +980,6 @@ mod tests {
         assert_eq!(id, "app.anim.events/balance");
         assert_eq!(label, "balance");
         // 没有子分类时不追加
-        assert_eq!(context_menu_defs(&[], false).len(), 5);
+        assert_eq!(context_menu_defs(&[], false, &[], "shenshen").len(), 5);
     }
 }
