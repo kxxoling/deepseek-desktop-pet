@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # 资产预处理：源 webm → clip.zst（zstd 压缩的连续 RGBA 帧流，320×180@15fps）
-# 用法：scripts/preprocess_assets.sh [JOBS]（默认并行 8；已有 clip.zst 自动跳过，可重跑）
+# 用法：scripts/preprocess_assets.sh [源角色的videos目录] [输出目录]
+#   不带参数时处理 submodule 里的内置 shenshen，输出到仓库 assets/（默认行为不变）
+#   接入新角色：scripts/preprocess_assets.sh <角色的videos目录> <输出目录>，产出 <输出目录>/frames 与 <输出目录>/meta，放进系统的外部角色目录即可被运行时发现
+#   并行度用环境变量 JOBS 控制（默认 8）；已有的 clip.zst 自动跳过，可以重复执行
 # 依赖：ffmpeg、zstd
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$ROOT/third_party/dsh-pet-indesktop/assets/characters/shenshen/videos"
-OUT="$ROOT/assets/frames"
-META="$ROOT/assets/meta"
-JOBS="${1:-8}"
+SRC="${1:-$ROOT/third_party/dsh-pet-indesktop/assets/characters/shenshen/videos}"
+CHAR_ROOT="${2:-$ROOT/assets}"
+OUT="$CHAR_ROOT/frames"
+META="$CHAR_ROOT/meta"
+JOBS="${JOBS:-8}"
 
 if [ ! -d "$SRC" ]; then
-  echo "缺少源资产 submodule：$SRC" >&2
-  echo "先执行：git submodule update --init" >&2
+  echo "源角色目录不存在：$SRC" >&2
+  if [ "$SRC" = "$ROOT/third_party/dsh-pet-indesktop/assets/characters/shenshen/videos" ]; then
+    echo "内置角色在 submodule 里，先执行：git submodule update --init" >&2
+  fi
   exit 1
 fi
 command -v ffmpeg >/dev/null || { echo "缺少 ffmpeg 命令（macOS: brew install ffmpeg / Debian: apt install ffmpeg）" >&2; exit 1; }
@@ -60,9 +66,10 @@ fi
 
 clips=$(find "$OUT" -name 'clip.zst' | wc -l | tr -d ' ')
 size=$(du -sk "$OUT" | cut -f1)
-# 产物总量校验：正常应数百 MB，过小说明转码源异常（防止静默空包）
-if [ "$size" -lt 10240 ]; then
-  echo "资产产物仅 ${size}KB（正常应 >100MB），转码源可能异常" >&2
+# 产物总量校验：每个 clip 正常应有数百 KB 到数 MB，总量明显偏小说明转码源异常（防止静默空包）
+# 阈值按 clip 数缩放，这样只转码小子集的测试也能用同一条规则
+if [ "$clips" -eq 0 ] || [ "$size" -lt $((clips * 512)) ]; then
+  echo "资产产物 ${size}KB / ${clips} 个 clip，明显偏小，转码源可能异常" >&2
   exit 1
 fi
 echo "完成：${clips} 个 clip.zst，共 $(du -sh "$OUT" | cut -f1)，输出于 ${OUT}"

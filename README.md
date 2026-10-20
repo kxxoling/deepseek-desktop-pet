@@ -21,6 +21,10 @@ cargo run --release
 ```
 
 预处理依赖 `ffmpeg` 与 `zstd`，可重复执行（跳过已完成片段）。
+外部角色接入：`scripts/preprocess_assets.sh <character-videos-dir> <output-root>` 产出
+`<output-root>/frames` 与 `<output-root>/meta`，放入系统的外部角色目录即可被识别
+（macOS `~/Library/Application Support/ds-pet/characters/<id>/`）。并行度用环境变量
+`JOBS` 控制（默认 8）。
 
 调试环境变量：`DS_PET_POS=x,y`（首窗位置）、`DS_ALPHA`（`post`/`pre`/`auto`）、
 `DS_PET_ASSETS`（资产目录）、`DS_PET_LOG_DIR`（日志目录）、
