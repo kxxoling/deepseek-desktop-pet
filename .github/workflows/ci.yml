@@ -67,6 +67,35 @@ jobs:
           path: assets.tar
           retention-days: 1
 
+  pipeline-e2e:
+    name: Character pipeline (external source)
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install ffmpeg and zstd
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg zstd
+      # Simulate dropping in an external character: copy a small subset of the
+      # upstream videos (one clip per category) and run the parameterized
+      # pipeline on it, then assert the output tree the runtime discovers
+      - name: Prepare subset source
+        run: |
+          V=third_party/dsh-pet-indesktop/assets/characters/shenshen/videos
+          mkdir -p /tmp/charsrc/idle /tmp/charsrc/move /tmp/charsrc/random
+          cp "$V"/manifest.json "$V"/move_strides.json "$V"/text_clips.json /tmp/charsrc/
+          cp "$(find "$V/idle" -name '*.webm' | head -1)" /tmp/charsrc/idle/
+          cp "$(find "$V/move" -name '*.webm' | head -1)" /tmp/charsrc/move/
+          cp "$(find "$V/random" -name '*.webm' | head -1)" /tmp/charsrc/random/
+      - name: Run pipeline with explicit source and output
+        run: scripts/preprocess_assets.sh /tmp/charsrc /tmp/charout
+      - name: Assert output structure
+        run: |
+          test "$(find /tmp/charout/frames -name clip.zst | wc -l)" -eq 3
+          for f in manifest.json move_strides.json text_clips.json app-icon.png; do
+            test -f "/tmp/charout/meta/$f"
+          done
+
   test:
     name: Test (${{ matrix.target }})
     needs: lint
