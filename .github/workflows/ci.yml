@@ -9,7 +9,7 @@ on:
 jobs:
   deny:
     name: Dependency audit (licenses / advisories)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -24,7 +24,7 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
@@ -50,7 +50,7 @@ jobs:
 
   assets:
     name: Preprocess frame assets
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -107,7 +107,7 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
@@ -129,7 +129,7 @@ jobs:
 
   coverage:
     name: Coverage (logic layer)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: lint
     steps:
       - uses: actions/checkout@v7
@@ -165,7 +165,7 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
