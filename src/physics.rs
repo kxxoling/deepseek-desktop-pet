@@ -129,7 +129,24 @@ pub const MAX_STEP_DIST: f64 = 54.0;
 pub const THROW_STRENGTH_MIN: f64 = 0.25;
 pub const THROW_STRENGTH_MAX: f64 = 3.0;
 
-/// 把甩出力度钳制到合法的倍率范围
+/// 弹弓发射的最大速度（px/s）
+pub const SLINGSHOT_MAX_SPEED: f64 = 2600.0;
+/// 弹弓拉距到速度的换算（px 拉距 × 系数 = px/s）
+pub const SLINGSHOT_GAIN: f64 = 8.0;
+
+/// 弹弓发射向量：从拉住点指向宠物中心的方向发射（反向拉），速度随拉距线性增长并封顶。
+/// `pet_center` 为宠物身体中心的全局坐标，`pull_pos` 为松手时光标位置
+pub fn slingshot_launch(pet_center: (f64, f64), pull_pos: (f64, f64)) -> (f64, f64) {
+    let dx = pet_center.0 - pull_pos.0;
+    let dy = pet_center.1 - pull_pos.1;
+    let dist = dx.hypot(dy);
+    if dist < f64::EPSILON {
+        return (0.0, 0.0);
+    }
+    let speed = (dist * SLINGSHOT_GAIN).min(SLINGSHOT_MAX_SPEED);
+    (dx / dist * speed, dy / dist * speed)
+}
+
 pub fn clamp_throw_strength(v: f64) -> f64 {
     v.clamp(THROW_STRENGTH_MIN, THROW_STRENGTH_MAX)
 }
@@ -538,5 +555,48 @@ mod throw_tests {
         assert_eq!(steps, 1);
         w.step(dt);
         approx(w.pets[0].pos.0, 100.0 + 60.0 * dt);
+    }
+}
+
+#[cfg(test)]
+mod slingshot_tests {
+    use super::tests::BOUNDS;
+    use super::*;
+
+    fn approx(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    #[test]
+    fn launches_opposite_to_pull() {
+        // 宠物在 (500, 300)，从 (300, 300) 向左拉 200pt：向右发射
+        let (vx, vy) = slingshot_launch((500.0, 300.0), (300.0, 300.0));
+        approx(vx, 200.0 * SLINGSHOT_GAIN);
+        approx(vy, 0.0);
+        // 斜向拉：方向沿拉向量的反向
+        let (vx, vy) = slingshot_launch((500.0, 300.0), (400.0, 400.0));
+        approx(
+            vx.hypot(vy),
+            100.0 * std::f64::consts::SQRT_2 * SLINGSHOT_GAIN,
+        );
+        assert!(vx > 0.0 && vy < 0.0);
+    }
+
+    #[test]
+    fn speed_caps_and_zero_pull() {
+        // 拉距极大时封顶
+        let (vx, vy) = slingshot_launch((0.0, 0.0), (-1e6, 0.0));
+        approx(vx, SLINGSHOT_MAX_SPEED);
+        approx(vy, 0.0);
+        // 拉点与宠物重合时不发射
+        assert_eq!(slingshot_launch((5.0, 5.0), (5.0, 5.0)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn half_screen_pull_reaches_cap() {
+        // 半屏拉距（750pt × 8 = 6000）超过封顶，发射速度即为封顶值
+        let (vx, _) = slingshot_launch((0.0, 0.0), (-750.0, 0.0));
+        approx(vx, SLINGSHOT_MAX_SPEED);
+        let _ = BOUNDS;
     }
 }
