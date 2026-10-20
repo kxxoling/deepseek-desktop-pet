@@ -953,6 +953,16 @@ impl PetWindow {
         self.blit();
     }
 
+    /// 隐藏或显示。恢复显示时把动画进度归零、重新播放；
+    /// 不归零的话，隐藏很久之后恢复的一瞬间动画会先快进一阵才停下来
+    pub fn set_visible(&mut self, visible: bool) {
+        self.window.set_visible(visible);
+        if visible {
+            self.anim.resync_clock();
+            self.blit();
+        }
+    }
+
     /// 触发一次黄金回旋；已在回旋中则加速
     pub fn start_spin(&mut self) {
         let omega = crate::render::spin_next_omega(self.spin.map(|(_, o)| o));
