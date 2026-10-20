@@ -77,6 +77,8 @@ pub struct PetWindow {
     probe: Option<(f64, Instant)>,
     /// 黄金回旋：累计角度与角速度（度、度/秒）
     spin: Option<(f64, f64)>,
+    /// 弹弓蓄力：拖拽中按住右键开始，记录按下位置（窗口内逻辑坐标）
+    sling_anchor: Option<(f64, f64)>,
     /// 被撞飞期间的 body 倾角（度），速度低时回到零
     knock_tilt: f64,
     /// 被撞飞的宠物落稳的时刻；到时重新判断是否回到探头姿态
@@ -204,6 +206,7 @@ impl PetWindow {
             opacity,
             probe: None,
             spin: None,
+            sling_anchor: None,
             knock_tilt: 0.0,
             knock_landed_at: None,
             rotate_scratch: vec![0u8; FRAME_BYTES],
@@ -775,6 +778,11 @@ impl PetWindow {
                 match button {
                     MouseButton::Left => self.on_left_press(),
                     // 物理坐标（菜单弹出示位置）
+                    MouseButton::Right if self.drag.is_some() => {
+                        // 拖拽中按右键：弹弓蓄力，松左键发射（此刻窗口内坐标即拉住点）
+                        self.sling_anchor = Some(self.cursor_local);
+                        None
+                    }
                     MouseButton::Right => Some(WindowRequest::ShowMenu(
                         self.cursor_phys.0 as i32,
                         self.cursor_phys.1 as i32,
@@ -789,6 +797,7 @@ impl PetWindow {
             } => self.on_left_release(),
             WindowEvent::Focused(false) => {
                 // 失焦只终止拖拽，不清点击判定（清了会误杀双击）
+                self.sling_anchor = None;
                 if self.drag.take().is_some() {
                     self.window.set_cursor(CursorIcon::Default);
                     self.velocity = (0.0, 0.0);
@@ -834,6 +843,21 @@ impl PetWindow {
             self.window.set_cursor(CursorIcon::Default);
             if action == Action::Click {
                 self.velocity = (0.0, 0.0); // 单击不走惯性
+            }
+            // 弹弓蓄力中松手：按拉距反向发射，不走普通惯性
+            if let Some(anchor) = self.sling_anchor.take()
+                && let Some((wx, wy)) = self.window_pos_logical()
+            {
+                let center = (
+                    wx + crate::physics::BodyBox::DEFAULT.center().0,
+                    wy + crate::physics::BodyBox::DEFAULT.center().1,
+                );
+                let pull = (wx + anchor.0, wy + anchor.1);
+                let (vx, vy) = crate::physics::slingshot_launch(center, pull);
+                if vx != 0.0 || vy != 0.0 {
+                    // velocity 单位是 px/ms，交给物理世界时再换算并按力度倍率放大
+                    self.velocity = (vx / 1000.0, vy / 1000.0);
+                }
             }
             // 贴着屏幕左右边缘松手：进入探头姿态，清掉速度不再飞出
             if action != Action::Click
