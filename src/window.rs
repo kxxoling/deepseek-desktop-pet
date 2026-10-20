@@ -77,6 +77,10 @@ pub struct PetWindow {
     probe: Option<(f64, Instant)>,
     /// 黄金回旋：累计角度与角速度（度、度/秒）
     spin: Option<(f64, f64)>,
+    /// 被撞飞期间的 body 倾角（度），速度低时回到零
+    knock_tilt: f64,
+    /// 被撞飞的宠物落稳的时刻；到时重新判断是否回到探头姿态
+    knock_landed_at: Option<Instant>,
     /// 旋转渲染的输出缓冲
     rotate_scratch: Vec<u8>,
     /// 最近一次交互时刻（省电判定用）
@@ -200,6 +204,8 @@ impl PetWindow {
             opacity,
             probe: None,
             spin: None,
+            knock_tilt: 0.0,
+            knock_landed_at: None,
             rotate_scratch: vec![0u8; FRAME_BYTES],
             last_interaction: Instant::now(),
             lock_position: crate::config::get_bool("lock_position").unwrap_or(false),
@@ -234,11 +240,12 @@ impl PetWindow {
             let scale = crate::render::squash_scale(t);
             if scale < 1.0 {
                 squash_into(&mut self.squash_scratch, src, scale);
-                // 探头或回旋姿态下，压缩结果再整体倾斜
+                // 回旋、探头或被撞飞姿态下，压缩结果再整体倾斜
                 if let Some(angle) = self
                     .spin
                     .map(|(angle, _)| angle)
                     .or_else(|| self.probe.map(|(angle, _)| angle))
+                    .or_else(|| (self.knock_tilt != 0.0).then_some(self.knock_tilt))
                 {
                     crate::render::rotate_into(
                         &mut self.rotate_scratch,
@@ -255,11 +262,12 @@ impl PetWindow {
             }
             self.squash_start = None;
         }
-        // 回旋优先于探头：回旋中的持续旋转角覆盖探头姿态角
+        // 旋转角来源的优先级：回旋、探头、被撞飞的倾角
         let spin_or_probe = self
             .spin
             .map(|(angle, _)| angle)
-            .or_else(|| self.probe.map(|(angle, _)| angle));
+            .or_else(|| self.probe.map(|(angle, _)| angle))
+            .or_else(|| (self.knock_tilt != 0.0).then_some(self.knock_tilt));
         if let Some(angle) = spin_or_probe {
             crate::render::rotate_into(
                 &mut self.rotate_scratch,
@@ -589,6 +597,21 @@ impl PetWindow {
         if matches!(self.anim.mode, Mode::Drag) && body.state == crate::physics::PetState::Resting {
             self.enter_idle();
         }
+        // 探头中被撞（物理状态转为 Flying）：撤掉探头姿态进入撞飞，倾角随速度变化
+        if self.probe.is_some() && body.state == crate::physics::PetState::Flying {
+            self.probe = None;
+            self.knock_tilt = crate::render::knock_tilt_of(body.vel.0);
+            self.blit();
+        }
+        if body.state == crate::physics::PetState::Flying {
+            self.knock_tilt = crate::render::knock_tilt_of(body.vel.0);
+        }
+        // 落稳：倾角归零，开始计重新进入探头姿态要等待的时间
+        if body.state == crate::physics::PetState::Resting && self.knock_tilt != 0.0 {
+            self.knock_tilt = 0.0;
+            self.knock_landed_at = Some(Instant::now());
+            self.blit();
+        }
         if let Some((x, y)) = self.window_pos_logical()
             && (x - body.pos.0).abs() + (y - body.pos.1).abs() > 0.5
         {
@@ -626,6 +649,21 @@ impl PetWindow {
             } else {
                 self.spin = Some((angle + omega * dt, omega));
                 self.blit();
+            }
+        }
+        if let Some(landed) = self.knock_landed_at
+            && now.duration_since(landed).as_secs_f64() >= crate::render::KNOCK_REPROBE_SECS
+        {
+            self.knock_landed_at = None;
+            if let Some((x, _y)) = self.window_pos_logical()
+                && let Some(m) = self.window.current_monitor()
+            {
+                let scale = m.scale_factor();
+                let size: LogicalSize<f64> = m.size().to_logical(scale);
+                if let Some(angle) = crate::render::probe_angle_at(x, WIN_W, size.width) {
+                    self.probe = Some((angle, now));
+                    self.blit();
+                }
             }
         }
         if self.spin.is_none()
