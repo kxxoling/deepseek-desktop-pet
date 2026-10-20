@@ -102,6 +102,8 @@ const MENU_ANIM_PREFIX: &str = "app.anim.";
 const MENU_CHAR_PREFIX: &str = "app.char.";
 /// 黄金回旋菜单项
 const MENU_SPIN: &str = "app.spin";
+/// 设置菜单项 ID 前缀；后接「设置名.值」（值为整数百分比，避免小数点歧义）
+const MENU_SET_PREFIX: &str = "app.set.";
 
 /// 菜单项定义（纯数据，加菜单项就是往表里加一行）；muda 菜单构建必须在主线程
 #[allow(dead_code)]
@@ -142,8 +144,9 @@ fn context_menu_defs(
     autostart_on: bool,
     chars: &[CharacterEntry],
     current: &str,
+    settings: &SettingsSnapshot,
 ) -> Vec<MenuItemDef> {
-    let mut defs = base_context_defs(autostart_on);
+    let mut defs = base_context_defs(autostart_on, settings);
     append_character_submenu(&mut defs, chars, current);
     if !subs.is_empty() {
         let children = subs
@@ -161,23 +164,108 @@ fn context_menu_defs(
     defs
 }
 
-fn base_context_defs(autostart_on: bool) -> Vec<MenuItemDef> {
+fn base_context_defs(autostart_on: bool, settings: &SettingsSnapshot) -> Vec<MenuItemDef> {
     vec![
         item(MENU_NEW, "新增一只"),
         item(MENU_CLOSE, "关闭这只"),
         item(MENU_SPIN, "黄金回旋"),
         item(MENU_LOGS, "打开日志文件夹"),
         check(MENU_AUTOSTART, "开机自启", autostart_on),
+        settings_submenu(settings),
         item(MENU_EXIT, "退出"),
     ]
 }
 
+/// 设置菜单需要的配置快照（构造保持纯函数，便于单测）
+struct SettingsSnapshot {
+    opacity: f64,
+    speed: f64,
+    lock: bool,
+    shift_only: bool,
+    power_on: bool,
+}
+
+impl SettingsSnapshot {
+    /// 从 config 读取当前值
+    fn from_config() -> Self {
+        Self {
+            opacity: config::get_f64("opacity").map_or(1.0, config::clamp_opacity),
+            speed: config::get_f64("playback_speed").unwrap_or(1.0),
+            lock: config::get_bool("lock_position").unwrap_or(false),
+            shift_only: config::get_bool("shift_drag_only").unwrap_or(false),
+            power_on: config::get_i64("power_saving_idle_secs").unwrap_or(0) > 0,
+        }
+    }
+}
+
+/// 不透明度档位（步进 10%）
+const OPACITY_LEVELS: [u32; 6] = [100, 90, 80, 70, 60, 50];
+/// 播放速率档位（步进 0.25）
+const SPEED_LEVELS: [u32; 5] = [100, 125, 150, 175, 200];
+/// 省电开启时的闲置秒数（关闭为 0）
+const POWER_ON_SECS: i64 = 30;
+
+/// 「设置」子菜单：不透明度与播放速率按档位选取（当前档带「✓」前缀），
+/// 三个开关用勾选项；改动即时生效，无需重启
+fn settings_submenu(snap: &SettingsSnapshot) -> MenuItemDef {
+    MenuItemDef::Submenu {
+        label: "设置".to_string(),
+        children: vec![
+            MenuItemDef::Submenu {
+                label: "不透明度".to_string(),
+                children: OPACITY_LEVELS
+                    .iter()
+                    .map(|lv| {
+                        let label = if (f64::from(*lv) / 100.0 - snap.opacity).abs() < 1e-9 {
+                            format!("✓ {lv}%")
+                        } else {
+                            format!("{lv}%")
+                        };
+                        item(&format!("{MENU_SET_PREFIX}opacity.{lv}"), &label)
+                    })
+                    .collect(),
+            },
+            MenuItemDef::Submenu {
+                label: "播放速率".to_string(),
+                children: SPEED_LEVELS
+                    .iter()
+                    .map(|lv| {
+                        let label = if (f64::from(*lv) / 100.0 - snap.speed).abs() < 1e-9 {
+                            format!("✓ {lv}%")
+                        } else {
+                            format!("{lv}%")
+                        };
+                        item(&format!("{MENU_SET_PREFIX}speed.{lv}"), &label)
+                    })
+                    .collect(),
+            },
+            check(&format!("{MENU_SET_PREFIX}lock"), "锁定位置", snap.lock),
+            check(
+                &format!("{MENU_SET_PREFIX}shift"),
+                "仅限 SHIFT 拖动",
+                snap.shift_only,
+            ),
+            check(
+                &format!("{MENU_SET_PREFIX}power"),
+                "省电模式",
+                snap.power_on,
+            ),
+        ],
+    }
+}
+
 /// 托盘菜单（无「关闭这只」：托盘不指向具体窗口）
-fn tray_menu_defs(autostart_on: bool, chars: &[CharacterEntry], current: &str) -> Vec<MenuItemDef> {
+fn tray_menu_defs(
+    autostart_on: bool,
+    chars: &[CharacterEntry],
+    current: &str,
+    settings: &SettingsSnapshot,
+) -> Vec<MenuItemDef> {
     let mut defs = vec![
         item(MENU_NEW, "新增一只"),
         item(MENU_LOGS, "打开日志文件夹"),
         check(MENU_AUTOSTART, "开机自启", autostart_on),
+        settings_submenu(settings),
         item(MENU_EXIT, "退出"),
     ];
     append_character_submenu(&mut defs, chars, current);
@@ -296,12 +384,14 @@ fn build_context_menu(
     autostart_on: bool,
     chars: &[CharacterEntry],
     current: &str,
+    settings: &SettingsSnapshot,
 ) -> muda::Result<muda::Menu> {
     build_menu(&context_menu_defs(
         &events_subcategories(lib),
         autostart_on,
         chars,
         current,
+        settings,
     ))
 }
 
@@ -309,8 +399,9 @@ fn build_tray_menu(
     autostart_on: bool,
     chars: &[CharacterEntry],
     current: &str,
+    settings: &SettingsSnapshot,
 ) -> muda::Result<muda::Menu> {
-    build_menu(&tray_menu_defs(autostart_on, chars, current))
+    build_menu(&tray_menu_defs(autostart_on, chars, current, settings))
 }
 
 fn build_tray(
@@ -476,12 +567,17 @@ impl App {
             autostart_on,
             &self.characters,
             &self.current_character,
+            &SettingsSnapshot::from_config(),
         ) {
             self.ctx_menu = std::rc::Rc::new(menu);
         }
         if let Some(tray) = &self.tray
-            && let Ok(menu) =
-                build_tray_menu(autostart_on, &self.characters, &self.current_character)
+            && let Ok(menu) = build_tray_menu(
+                autostart_on,
+                &self.characters,
+                &self.current_character,
+                &SettingsSnapshot::from_config(),
+            )
         {
             tray.set_menu(Some(Box::new(menu)));
         }
@@ -564,13 +660,83 @@ impl App {
             return;
         }
         let on = autostart::is_enabled();
-        if let Ok(menu) =
-            build_context_menu(&self.lib, on, &self.characters, &self.current_character)
-        {
+        if let Ok(menu) = build_context_menu(
+            &self.lib,
+            on,
+            &self.characters,
+            &self.current_character,
+            &SettingsSnapshot::from_config(),
+        ) {
             self.ctx_menu = std::rc::Rc::new(menu);
         }
         if let Some(tray) = &self.tray
-            && let Ok(menu) = build_tray_menu(on, &self.characters, &self.current_character)
+            && let Ok(menu) = build_tray_menu(
+                on,
+                &self.characters,
+                &self.current_character,
+                &SettingsSnapshot::from_config(),
+            )
+        {
+            tray.set_menu(Some(Box::new(menu)));
+        }
+    }
+
+    /// 应用设置菜单的一项改动：写入 config，对所有窗口立即生效，并重建两处菜单刷新显示
+    fn apply_setting(&mut self, rest: &str) {
+        let Some((name, value)) = rest.split_once('.') else {
+            log::debug!("无法解析的设置项：{rest}");
+            return;
+        };
+        let percent = value.parse::<i64>().ok().and_then(|v| {
+            (1..=200)
+                .contains(&v)
+                .then_some(f64::from(v as u32) / 100.0)
+        });
+        match name {
+            // 档位值以整数百分比编码，避免 ID 里出现小数点
+            "opacity" => {
+                let Some(v) = percent else { return };
+                config::set("opacity", config::clamp_opacity(v));
+            }
+            "speed" => {
+                let Some(v) = percent else { return };
+                config::set("playback_speed", v.clamp(1.0, 2.0));
+            }
+            // 开关项翻转当前值
+            "lock" => {
+                let on = !config::get_bool("lock_position").unwrap_or(false);
+                config::set("lock_position", on);
+            }
+            "shift" => {
+                let on = !config::get_bool("shift_drag_only").unwrap_or(false);
+                config::set("shift_drag_only", on);
+            }
+            "power" => {
+                let on = config::get_i64("power_saving_idle_secs").unwrap_or(0) == 0;
+                config::set("power_saving_idle_secs", if on { POWER_ON_SECS } else { 0 });
+            }
+            _ => log::debug!("未知设置项：{name}"),
+        }
+        for pet in &mut self.pets {
+            pet.refresh_settings();
+        }
+        let settings = SettingsSnapshot::from_config();
+        if let Ok(menu) = build_context_menu(
+            &self.lib,
+            autostart::is_enabled(),
+            &self.characters,
+            &self.current_character,
+            &settings,
+        ) {
+            self.ctx_menu = std::rc::Rc::new(menu);
+        }
+        if let Some(tray) = &self.tray
+            && let Ok(menu) = build_tray_menu(
+                autostart::is_enabled(),
+                &self.characters,
+                &self.current_character,
+                &settings,
+            )
         {
             tray.set_menu(Some(Box::new(menu)));
         }
@@ -596,6 +762,9 @@ impl App {
             }
             MENU_SPIN => {
                 let _ = self.proxy.send_event(UserEvent::SpinPet);
+            }
+            _ if let Some(rest) = id.strip_prefix(MENU_SET_PREFIX) => {
+                self.apply_setting(rest);
             }
             _ if let Some(spec) = id.strip_prefix(MENU_ANIM_PREFIX) => {
                 let _ = self
@@ -874,10 +1043,13 @@ fn main() {
 
     autostart::cleanup_stale();
     let autostart_on = autostart::is_enabled();
+    let settings = SettingsSnapshot::from_config();
     let ctx_menu = std::rc::Rc::new(
-        build_context_menu(&lib, autostart_on, &entries, &current).expect("右键菜单创建失败"),
+        build_context_menu(&lib, autostart_on, &entries, &current, &settings)
+            .expect("右键菜单创建失败"),
     );
-    let tray_menu = build_tray_menu(autostart_on, &entries, &current).expect("托盘菜单创建失败");
+    let tray_menu =
+        build_tray_menu(autostart_on, &entries, &current, &settings).expect("托盘菜单创建失败");
     let icon = lib
         .find_idle()
         .and_then(|id| lib.first_frame(&id))
@@ -955,8 +1127,8 @@ mod tests {
     #[test]
     fn menu_ids_unique_and_nonempty() {
         for defs in [
-            base_context_defs(true),
-            tray_menu_defs(false, &[], "shenshen"),
+            base_context_defs(true, &snap()),
+            tray_menu_defs(false, &[], "shenshen", &snap()),
         ] {
             let mut ids = Vec::new();
             collect_ids(&defs, &mut ids);
@@ -972,15 +1144,16 @@ mod tests {
 
     #[test]
     fn menus_match_previous_structure() {
-        let ctx_defs = base_context_defs(false);
+        let ctx_defs = base_context_defs(false, &snap());
         let mut ctx = Vec::new();
         collect_ids(&ctx_defs, &mut ctx);
-        let tray_defs = tray_menu_defs(false, &[], "shenshen");
+        let tray_defs = tray_menu_defs(false, &[], "shenshen", &snap());
         let mut tray = Vec::new();
         collect_ids(&tray_defs, &mut tray);
-        // 右键六项（含黄金回旋与开机自启）、托盘四项；「关闭这只」只在右键
-        assert_eq!(ctx.len(), 6);
-        assert_eq!(tray.len(), 4);
+        // 顶层：右键七项、托盘五项（各含自启、回旋与设置）；统计是深收集，
+        // 「设置」子树再贡献 14 项（不透明度 6 档 + 速率 5 档 + 3 个开关）
+        assert_eq!(ctx.len(), 20);
+        assert_eq!(tray.len(), 18);
         assert!(ctx.contains(&MENU_CLOSE));
         assert!(!tray.contains(&MENU_CLOSE));
         for id in [MENU_NEW, MENU_LOGS, MENU_EXIT] {
@@ -1050,6 +1223,16 @@ mod tests {
         assert_eq!(parse_pos_env(), None);
     }
 
+    fn snap() -> SettingsSnapshot {
+        SettingsSnapshot {
+            opacity: 1.0,
+            speed: 1.0,
+            lock: false,
+            shift_only: false,
+            power_on: false,
+        }
+    }
+
     fn char_entry(id: &str, name: &str) -> CharacterEntry {
         CharacterEntry {
             id: id.to_string(),
@@ -1059,19 +1242,22 @@ mod tests {
 
     #[test]
     fn character_submenu_only_with_multiple() {
-        // 单角色不出现子菜单，结构不变（右键6项、托盘4项，含自启与黄金回旋）
+        // 单角色不出现子菜单，结构不变（右键7项、托盘5项，含自启、回旋与设置）
         let one = [char_entry("shenshen", "shenshen")];
-        assert_eq!(context_menu_defs(&[], false, &one, "shenshen").len(), 6);
-        assert_eq!(tray_menu_defs(false, &one, "shenshen").len(), 4);
+        assert_eq!(
+            context_menu_defs(&[], false, &one, "shenshen", &snap()).len(),
+            7
+        );
+        assert_eq!(tray_menu_defs(false, &one, "shenshen", &snap()).len(), 5);
         // 双角色：在「退出」前插入「角色」子菜单，当前角色的一项带「✓」前缀
         let two = [
             char_entry("shenshen", "申申"),
             char_entry("test", "测试角色"),
         ];
-        let defs = context_menu_defs(&[], false, &two, "test");
-        // 顺序：新增/关闭/黄金回旋/日志/自启/角色/退出
-        let MenuItemDef::Submenu { label, children } = &defs[5] else {
-            panic!("第六项应为角色子菜单");
+        let defs = context_menu_defs(&[], false, &two, "test", &snap());
+        // 顺序：新增/关闭/黄金回旋/日志/自启/设置/角色/退出
+        let MenuItemDef::Submenu { label, children } = &defs[6] else {
+            panic!("第七项应为角色子菜单");
         };
         assert_eq!(label, "角色");
         assert_eq!(children.len(), 2);
@@ -1084,7 +1270,52 @@ mod tests {
             unreachable!();
         };
         assert_eq!(label, "✓ 测试角色");
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 8);
+    }
+
+    #[test]
+    fn settings_submenu_marks_current_levels() {
+        let mut sn = snap();
+        sn.opacity = 0.7;
+        sn.speed = 1.5;
+        sn.lock = true;
+        let MenuItemDef::Submenu { children, .. } = settings_submenu(&sn) else {
+            unreachable!();
+        };
+        // 前两级是档位子菜单，后三个是开关
+        let MenuItemDef::Submenu {
+            children: opacity_items,
+            ..
+        } = &children[0]
+        else {
+            unreachable!();
+        };
+        let MenuItemDef::Item { id, label } = &opacity_items[3] else {
+            unreachable!();
+        };
+        assert_eq!(id, "app.set.opacity.70");
+        assert_eq!(label, "✓ 70%");
+        let MenuItemDef::Item { label, .. } = &opacity_items[0] else {
+            unreachable!();
+        };
+        assert_eq!(label, "100%");
+        let MenuItemDef::Submenu {
+            children: speed_items,
+            ..
+        } = &children[1]
+        else {
+            unreachable!();
+        };
+        let MenuItemDef::Item { id, label, .. } = &speed_items[2] else {
+            unreachable!();
+        };
+        assert_eq!(id, "app.set.speed.150");
+        assert_eq!(label, "✓ 150%");
+        let MenuItemDef::Check { id, checked, .. } = &children[2] else {
+            unreachable!();
+        };
+        assert_eq!(id, "app.set.lock");
+        assert!(*checked);
     }
 
     #[test]
@@ -1116,9 +1347,9 @@ mod tests {
 
     #[test]
     fn anim_submenu_appends_and_prefixes() {
-        let defs = context_menu_defs(&["balance".to_string()], false, &[], "shenshen");
-        // 基础六项之上插入「动画」子菜单
-        assert_eq!(defs.len(), 7);
+        let defs = context_menu_defs(&["balance".to_string()], false, &[], "shenshen", &snap());
+        // 基础七项之上插入「动画」子菜单
+        assert_eq!(defs.len(), 8);
         let MenuItemDef::Submenu { label, children } = &defs[2] else {
             panic!("第三项应为动画子菜单");
         };
@@ -1129,6 +1360,9 @@ mod tests {
         assert_eq!(id, "app.anim.events/balance");
         assert_eq!(label, "balance");
         // 没有子分类时不追加
-        assert_eq!(context_menu_defs(&[], false, &[], "shenshen").len(), 6);
+        assert_eq!(
+            context_menu_defs(&[], false, &[], "shenshen", &snap()).len(),
+            7
+        );
     }
 }

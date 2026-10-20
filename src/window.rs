@@ -908,6 +908,27 @@ impl PetWindow {
         self.blit();
     }
 
+    /// 重新从 config 读取各项设置并立即生效（设置菜单改动后调用）：
+    /// 不透明度、播放速率、甩出力度、锁定与 SHIFT 拖动、省电阈值
+    pub fn refresh_settings(&mut self) {
+        let opacity = crate::config::get_f64("opacity").map_or(1.0, crate::config::clamp_opacity);
+        platform::set_window_opacity(&self.window, opacity);
+        #[cfg(target_os = "windows")]
+        {
+            self.opacity = opacity;
+        }
+        if let Some(speed) = crate::config::get_f64("playback_speed") {
+            self.anim.set_speed(speed);
+        }
+        self.lock_position = crate::config::get_bool("lock_position").unwrap_or(false);
+        self.shift_drag_only = crate::config::get_bool("shift_drag_only").unwrap_or(false);
+        self.power_save_idle_secs =
+            crate::config::get_i64("power_saving_idle_secs").map_or(0, |v| v.max(0) as u64);
+        self.throw_mult = crate::config::get_f64("throw_strength")
+            .map_or(1.0, crate::physics::clamp_throw_strength);
+        self.blit();
+    }
+
     /// 触发一次黄金回旋；已在回旋中则加速
     pub fn start_spin(&mut self) {
         let omega = crate::render::spin_next_omega(self.spin.map(|(_, o)| o));
