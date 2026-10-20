@@ -42,6 +42,8 @@ pub enum UserEvent {
     },
     /// 触发播放特殊片段，参数为类名或「类/子分类」
     TriggerClip(String),
+    /// 对右键菜单目标宠物触发黄金回旋
+    SpinPet,
     ExitApp,
 }
 
@@ -98,6 +100,8 @@ const MENU_AUTOSTART: &str = "app.autostart";
 const MENU_ANIM_PREFIX: &str = "app.anim.";
 /// 角色切换菜单项 ID 前缀，后面接角色 id
 const MENU_CHAR_PREFIX: &str = "app.char.";
+/// 黄金回旋菜单项
+const MENU_SPIN: &str = "app.spin";
 
 /// 菜单项定义（纯数据，加菜单项就是往表里加一行）；muda 菜单构建必须在主线程
 #[allow(dead_code)]
@@ -161,6 +165,7 @@ fn base_context_defs(autostart_on: bool) -> Vec<MenuItemDef> {
     vec![
         item(MENU_NEW, "新增一只"),
         item(MENU_CLOSE, "关闭这只"),
+        item(MENU_SPIN, "黄金回旋"),
         item(MENU_LOGS, "打开日志文件夹"),
         check(MENU_AUTOSTART, "开机自启", autostart_on),
         item(MENU_EXIT, "退出"),
@@ -589,6 +594,9 @@ impl App {
             _ if let Some(char_id) = id.strip_prefix(MENU_CHAR_PREFIX) => {
                 self.switch_character(char_id);
             }
+            MENU_SPIN => {
+                let _ = self.proxy.send_event(UserEvent::SpinPet);
+            }
             _ if let Some(spec) = id.strip_prefix(MENU_ANIM_PREFIX) => {
                 let _ = self
                     .proxy
@@ -633,6 +641,14 @@ impl ApplicationHandler<UserEvent> for App {
                     && !pet.trigger_clip(&spec)
                 {
                     log::debug!("触发被拒绝：{spec}");
+                }
+            }
+            UserEvent::SpinPet => {
+                // 右键菜单在具体宠物上弹出，回旋也落在它身上
+                if let Some(target) = self.menu_target
+                    && let Some(pet) = self.pets.iter_mut().find(|p| p.id() == target)
+                {
+                    pet.start_spin();
                 }
             }
             UserEvent::ExitApp => {
@@ -962,8 +978,8 @@ mod tests {
         let tray_defs = tray_menu_defs(false, &[], "shenshen");
         let mut tray = Vec::new();
         collect_ids(&tray_defs, &mut tray);
-        // 右键五项、托盘四项（各含「开机自启」勾选项）；「关闭这只」只在右键
-        assert_eq!(ctx.len(), 5);
+        // 右键六项（含黄金回旋与开机自启）、托盘四项；「关闭这只」只在右键
+        assert_eq!(ctx.len(), 6);
         assert_eq!(tray.len(), 4);
         assert!(ctx.contains(&MENU_CLOSE));
         assert!(!tray.contains(&MENU_CLOSE));
@@ -1043,9 +1059,9 @@ mod tests {
 
     #[test]
     fn character_submenu_only_with_multiple() {
-        // 单角色不出现子菜单，结构不变（右键5项、托盘4项，各含自启勾选）
+        // 单角色不出现子菜单，结构不变（右键6项、托盘4项，含自启与黄金回旋）
         let one = [char_entry("shenshen", "shenshen")];
-        assert_eq!(context_menu_defs(&[], false, &one, "shenshen").len(), 5);
+        assert_eq!(context_menu_defs(&[], false, &one, "shenshen").len(), 6);
         assert_eq!(tray_menu_defs(false, &one, "shenshen").len(), 4);
         // 双角色：在「退出」前插入「角色」子菜单，当前角色的一项带「✓」前缀
         let two = [
@@ -1053,9 +1069,9 @@ mod tests {
             char_entry("test", "测试角色"),
         ];
         let defs = context_menu_defs(&[], false, &two, "test");
-        // 顺序：新增/关闭/日志/自启/角色/退出
-        let MenuItemDef::Submenu { label, children } = &defs[4] else {
-            panic!("第五项应为角色子菜单");
+        // 顺序：新增/关闭/黄金回旋/日志/自启/角色/退出
+        let MenuItemDef::Submenu { label, children } = &defs[5] else {
+            panic!("第六项应为角色子菜单");
         };
         assert_eq!(label, "角色");
         assert_eq!(children.len(), 2);
@@ -1068,7 +1084,7 @@ mod tests {
             unreachable!();
         };
         assert_eq!(label, "✓ 测试角色");
-        assert_eq!(defs.len(), 6);
+        assert_eq!(defs.len(), 7);
     }
 
     #[test]
@@ -1101,8 +1117,8 @@ mod tests {
     #[test]
     fn anim_submenu_appends_and_prefixes() {
         let defs = context_menu_defs(&["balance".to_string()], false, &[], "shenshen");
-        // 基础五项之上插入「动画」子菜单
-        assert_eq!(defs.len(), 6);
+        // 基础六项之上插入「动画」子菜单
+        assert_eq!(defs.len(), 7);
         let MenuItemDef::Submenu { label, children } = &defs[2] else {
             panic!("第三项应为动画子菜单");
         };
@@ -1113,6 +1129,6 @@ mod tests {
         assert_eq!(id, "app.anim.events/balance");
         assert_eq!(label, "balance");
         // 没有子分类时不追加
-        assert_eq!(context_menu_defs(&[], false, &[], "shenshen").len(), 5);
+        assert_eq!(context_menu_defs(&[], false, &[], "shenshen").len(), 6);
     }
 }

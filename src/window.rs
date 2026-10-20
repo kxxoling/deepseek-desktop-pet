@@ -75,6 +75,8 @@ pub struct PetWindow {
     opacity: f64,
     /// 探头姿态：倾角与进入时刻（None = 非探头）
     probe: Option<(f64, Instant)>,
+    /// 黄金回旋：累计角度与角速度（度、度/秒）
+    spin: Option<(f64, f64)>,
     /// 旋转渲染的输出缓冲
     rotate_scratch: Vec<u8>,
     /// 最近一次交互时刻（省电判定用）
@@ -94,6 +96,7 @@ pub struct PetWindow {
 }
 
 impl PetWindow {
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         event_loop: &ActiveEventLoop,
         lib: Arc<Library>,
@@ -196,6 +199,7 @@ impl PetWindow {
             #[cfg(target_os = "windows")]
             opacity,
             probe: None,
+            spin: None,
             rotate_scratch: vec![0u8; FRAME_BYTES],
             last_interaction: Instant::now(),
             lock_position: crate::config::get_bool("lock_position").unwrap_or(false),
@@ -230,8 +234,12 @@ impl PetWindow {
             let scale = crate::render::squash_scale(t);
             if scale < 1.0 {
                 squash_into(&mut self.squash_scratch, src, scale);
-                // 探头姿态下压缩结果再整体倾斜
-                if let Some((angle, _)) = self.probe {
+                // 探头或回旋姿态下，压缩结果再整体倾斜
+                if let Some(angle) = self
+                    .spin
+                    .map(|(angle, _)| angle)
+                    .or_else(|| self.probe.map(|(angle, _)| angle))
+                {
                     crate::render::rotate_into(
                         &mut self.rotate_scratch,
                         &self.squash_scratch,
@@ -247,8 +255,12 @@ impl PetWindow {
             }
             self.squash_start = None;
         }
-        // 探头姿态：整帧绕身体中心倾斜
-        if let Some((angle, _)) = self.probe {
+        // 回旋优先于探头：回旋中的持续旋转角覆盖探头姿态角
+        let spin_or_probe = self
+            .spin
+            .map(|(angle, _)| angle)
+            .or_else(|| self.probe.map(|(angle, _)| angle));
+        if let Some(angle) = spin_or_probe {
             crate::render::rotate_into(
                 &mut self.rotate_scratch,
                 src,
@@ -604,7 +616,20 @@ impl PetWindow {
             self.probe = None;
             self.blit();
         }
-        if self.probe.is_none()
+        // 回旋积分与摩擦衰减；角速度低于阈值就停转
+        if let Some((angle, omega)) = self.spin {
+            let dt = now.duration_since(self.last_tick_at).as_secs_f64();
+            let omega = omega * crate::render::SPIN_DECAY_PER_S.powf(dt);
+            if omega < crate::render::SPIN_STOP {
+                self.spin = None;
+                self.blit();
+            } else {
+                self.spin = Some((angle + omega * dt, omega));
+                self.blit();
+            }
+        }
+        if self.spin.is_none()
+            && self.probe.is_none()
             && matches!(self.anim.mode, Mode::Idle)
             && now >= self.anim.next_event_at
         {
@@ -842,6 +867,14 @@ impl PetWindow {
                 .filter_map(|id| self.lib.first_frame(&id).cloned().map(|f| (id, f)))
                 .collect(),
         );
+        self.blit();
+    }
+
+    /// 触发一次黄金回旋；已在回旋中则加速
+    pub fn start_spin(&mut self) {
+        let omega = crate::render::spin_next_omega(self.spin.map(|(_, o)| o));
+        let angle = self.spin.map_or(0.0, |(a, _)| a);
+        self.spin = Some((angle, omega));
         self.blit();
     }
 
