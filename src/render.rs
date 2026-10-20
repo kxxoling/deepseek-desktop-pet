@@ -10,6 +10,20 @@ use winit::window::Window;
 
 use crate::library::{FRAME_H, FRAME_W};
 
+/// 点击 Q 弹形变的总时长（毫秒）
+pub const SQUASH_DUR_MS: f64 = 300.0;
+
+/// 点击 Q 弹的高度比例曲线：压缩幅度随时间指数衰减，按余弦节奏回弹。
+/// `t_ms` 超出 `[0, SQUASH_DUR_MS)` 时返回 1（无形变）
+pub fn squash_scale(t_ms: f64) -> f64 {
+    if !(0.0..SQUASH_DUR_MS).contains(&t_ms) {
+        return 1.0;
+    }
+    let env = (-(t_ms / 120.0)).exp();
+    let osc = 0.5 + 0.5 * (std::f64::consts::TAU * t_ms / SQUASH_DUR_MS).cos();
+    1.0 - 0.35 * env * osc
+}
+
 const SHADER: &str = r"
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -554,6 +568,32 @@ impl OffscreenTarget {
             buffer,
             width,
             height,
+        }
+    }
+}
+
+#[cfg(test)]
+mod squash_tests {
+    use super::*;
+
+    fn close(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    #[test]
+    fn squash_scale_bounds_and_phases() {
+        // 起始时刻压缩最大：1 - 0.35 * env(0) * osc(0)
+        close(squash_scale(0.0), 1.0 - 0.35);
+        // 半程时回到原高：osc 为 0
+        close(squash_scale(SQUASH_DUR_MS / 2.0), 1.0);
+        // 超出时长后和负时间都返回无形变
+        close(squash_scale(SQUASH_DUR_MS), 1.0);
+        close(squash_scale(-1.0), 1.0);
+        // 全程都在 [1-0.35, 1]
+        let t = |i: usize| SQUASH_DUR_MS * f64::from(i as u32) / 16.0;
+        for i in 0..17 {
+            let s = squash_scale(t(i));
+            assert!((0.65..=1.0).contains(&s), "t={} s={}", t(i), s);
         }
     }
 }
