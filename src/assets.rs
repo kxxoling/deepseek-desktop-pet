@@ -3,6 +3,19 @@
 use std::path::PathBuf;
 
 /// 探测资产根目录：`DS_PET_ASSETS` > exe 同级 / macOS bundle Resources / cwd。
+/// 内置点击音效的字节（启动后首次使用时加载一次）
+static CLICK_SOUND: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+
+/// 取内置点击音效；文件缺失返回 None
+pub fn click_sound() -> Option<&'static [u8]> {
+    CLICK_SOUND
+        .get_or_init(|| {
+            let path = locate_assets_root().join("sounds/default/click.wav");
+            std::fs::read(&path).ok()
+        })
+        .as_deref()
+}
+
 pub fn locate_assets_root() -> PathBuf {
     if let Ok(p) = std::env::var("DS_PET_ASSETS") {
         let p = PathBuf::from(p);
@@ -41,6 +54,16 @@ pub fn locate_assets_root() -> PathBuf {
 #[cfg(test)]
 #[allow(unsafe_code)] // 测试内修改进程环境变量（edition 2024 要求 unsafe 块）
 mod tests {
+    use super::click_sound;
+
+    #[test]
+    fn click_sound_file_exists_and_is_wav() {
+        let data = click_sound().expect("内置音效文件应存在于 assets/sounds/default/");
+        // WAV 文件头至少 44 字节
+        assert!(data.len() > 44, "音效文件过小：{} 字节", data.len());
+        assert_eq!(&data[0..4], b"RIFF");
+    }
+
     use super::*;
 
     /// 测试辅助：安装 Trace 级空 logger，保证 log 宏参数被求值（覆盖率统计需要）

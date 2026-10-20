@@ -881,6 +881,7 @@ impl PetWindow {
         // 锁定/仅 SHIFT 模式下没有拖拽也照常播点击动画
         if action == Action::Click {
             self.play_oneshot_in("click");
+            Self::play_click_sound();
         }
         None
     }
@@ -960,6 +961,16 @@ impl PetWindow {
         if visible {
             self.anim.resync_clock();
             self.blit();
+        }
+    }
+
+    /// 点击时播放音效（config `click_sound_enabled` 控制，默认开）
+    fn play_click_sound() {
+        if !crate::config::get_bool("click_sound_enabled").unwrap_or(true) {
+            return;
+        }
+        if let Some(data) = crate::assets::click_sound() {
+            crate::audio::play(data);
         }
     }
 
