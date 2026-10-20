@@ -61,6 +61,8 @@ struct App {
     characters: Vec<CharacterEntry>,
     /// 当前角色 id（config `character`，缺省内置）
     current_character: String,
+    /// 全部桌宠当前是否隐藏；隐藏时不播动画、不算物理
+    pets_hidden: bool,
     gpu: Arc<render::Gpu>,
     proxy: EventLoopProxy<UserEvent>,
     pets: Vec<PetWindow>,
@@ -106,6 +108,8 @@ const MENU_CHAR_PREFIX: &str = "app.char.";
 const MENU_SPIN: &str = "app.spin";
 /// 设置菜单项 ID 前缀；后接「设置名.值」（值为整数百分比，避免小数点歧义）
 const MENU_SET_PREFIX: &str = "app.set.";
+/// 隐藏/显示桌宠菜单项
+const MENU_HIDE: &str = "app.hide";
 
 /// 菜单项定义（纯数据，加菜单项就是往表里加一行）；muda 菜单构建必须在主线程
 #[allow(dead_code)]
@@ -169,6 +173,7 @@ fn context_menu_defs(
 fn base_context_defs(autostart_on: bool, settings: &SettingsSnapshot) -> Vec<MenuItemDef> {
     vec![
         item(MENU_NEW, "新增一只"),
+        item(MENU_HIDE, "隐藏桌宠"),
         item(MENU_CLOSE, "关闭这只"),
         item(MENU_SPIN, "黄金回旋"),
         item(MENU_LOGS, "打开日志文件夹"),
@@ -586,6 +591,22 @@ impl App {
         log::info!("已切换角色：{char_id}");
     }
 
+    /// 把全部桌宠显示或隐藏。隐藏时不播动画、不算物理，恢复显示后动画重新播放，不会快进
+    fn toggle_pets_visible(&mut self) {
+        self.pets_hidden = !self.pets_hidden;
+        for pet in &mut self.pets {
+            pet.set_visible(!self.pets_hidden);
+        }
+        log::info!(
+            "{}",
+            if self.pets_hidden {
+                "桌宠已隐藏"
+            } else {
+                "桌宠已显示"
+            }
+        );
+    }
+
     fn spawn_pet(&mut self, event_loop: &ActiveEventLoop, at: Option<(f64, f64)>) {
         if self.pets.len() >= MAX_PETS {
             log::warn!("窗口数量已达上限 {MAX_PETS}，忽略新增请求");
@@ -762,6 +783,7 @@ impl App {
             _ if let Some(char_id) = id.strip_prefix(MENU_CHAR_PREFIX) => {
                 self.switch_character(char_id);
             }
+            MENU_HIDE => self.toggle_pets_visible(),
             MENU_SPIN => {
                 let _ = self.proxy.send_event(UserEvent::SpinPet);
             }
@@ -880,23 +902,26 @@ impl ApplicationHandler<UserEvent> for App {
                         ..
                     }
             ) {
-                self.spawn_pet(event_loop, None);
+                // 点托盘图标把全部桌宠显示或隐藏；要新增宠物只能通过右键菜单
+                self.toggle_pets_visible();
             }
         }
 
-        // 唤醒对齐下一动画帧时刻；拖拽/惯性期间提高轮询频率
+        // 隐藏时不播动画、不算物理，只保留菜单能点
         let mut deadline = now + POLL_TICK;
-        for pet in &mut self.pets {
-            pet.tick(now);
-            if let Some(nf) = pet.anim.next_frame_at() {
-                deadline = deadline.min(nf);
+        if !self.pets_hidden {
+            for pet in &mut self.pets {
+                pet.tick(now);
+                if let Some(nf) = pet.anim.next_frame_at() {
+                    deadline = deadline.min(nf);
+                }
+                if pet.is_interacting() {
+                    deadline = deadline.min(now + FAST_TICK);
+                }
             }
-            if pet.is_interacting() {
-                deadline = deadline.min(now + FAST_TICK);
-            }
-        }
 
-        self.step_physics(now);
+            self.step_physics(now);
+        }
         self.maintain_positions(event_loop, now);
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -1080,6 +1105,7 @@ fn main() {
         lib,
         characters: entries,
         current_character: current,
+        pets_hidden: false,
         gpu,
         proxy,
         pets: Vec::new(),
@@ -1156,7 +1182,7 @@ mod tests {
         collect_ids(&tray_defs, &mut tray);
         // 顶层：右键七项、托盘五项（各含自启、回旋与设置）；统计是深收集，
         // 「设置」子树再贡献 14 项（不透明度 6 档 + 速率 5 档 + 3 个开关）
-        assert_eq!(ctx.len(), 20);
+        assert_eq!(ctx.len(), 21);
         assert_eq!(tray.len(), 18);
         assert!(ctx.contains(&MENU_CLOSE));
         assert!(!tray.contains(&MENU_CLOSE));
@@ -1250,7 +1276,7 @@ mod tests {
         let one = [char_entry("shenshen", "shenshen")];
         assert_eq!(
             context_menu_defs(&[], false, &one, "shenshen", &snap()).len(),
-            7
+            8
         );
         assert_eq!(tray_menu_defs(false, &one, "shenshen", &snap()).len(), 5);
         // 双角色：在「退出」前插入「角色」子菜单，当前角色的一项带「✓」前缀
@@ -1260,8 +1286,8 @@ mod tests {
         ];
         let defs = context_menu_defs(&[], false, &two, "test", &snap());
         // 顺序：新增/关闭/黄金回旋/日志/自启/设置/角色/退出
-        let MenuItemDef::Submenu { label, children } = &defs[6] else {
-            panic!("第七项应为角色子菜单");
+        let MenuItemDef::Submenu { label, children } = &defs[7] else {
+            panic!("第八项应为角色子菜单");
         };
         assert_eq!(label, "角色");
         assert_eq!(children.len(), 2);
@@ -1274,7 +1300,7 @@ mod tests {
             unreachable!();
         };
         assert_eq!(label, "✓ 测试角色");
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 9);
     }
 
     #[test]
@@ -1352,8 +1378,8 @@ mod tests {
     #[test]
     fn anim_submenu_appends_and_prefixes() {
         let defs = context_menu_defs(&["balance".to_string()], false, &[], "shenshen", &snap());
-        // 基础七项之上插入「动画」子菜单
-        assert_eq!(defs.len(), 8);
+        // 基础八项之上插入「动画」子菜单
+        assert_eq!(defs.len(), 9);
         let MenuItemDef::Submenu { label, children } = &defs[2] else {
             panic!("第三项应为动画子菜单");
         };
@@ -1366,7 +1392,7 @@ mod tests {
         // 没有子分类时不追加
         assert_eq!(
             context_menu_defs(&[], false, &[], "shenshen", &snap()).len(),
-            7
+            8
         );
     }
 }

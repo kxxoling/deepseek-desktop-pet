@@ -356,6 +356,11 @@ impl Anim {
         self.frames.as_ref().map_or(1, |f| f.frame_count())
     }
 
+    /// 把动画进度归零，从现在重新播放。长时间暂停后恢复时必须调这个，否则恢复的一瞬间动画会先快进一阵才停下来
+    pub fn resync_clock(&mut self) {
+        self.next_frame_at = None;
+    }
+
     /// 下一次帧推进时刻（事件循环据此调度唤醒）
     pub fn next_frame_at(&self) -> Option<Instant> {
         self.next_frame_at
