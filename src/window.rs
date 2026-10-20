@@ -71,6 +71,12 @@ pub struct PetWindow {
     opacity: f64,
     /// 最近一次交互时刻（省电判定用）
     last_interaction: Instant,
+    /// 锁定位置：不受理拖拽（点击/双击不受影响，config `lock_position`）
+    lock_position: bool,
+    /// 仅允许按住 SHIFT 拖动（config `shift_drag_only`）
+    shift_drag_only: bool,
+    /// 当前键盘修饰键状态（SHIFT 拖动模式判定用）
+    modifiers: winit::keyboard::ModifiersState,
     /// 省电阈值秒数（0=关闭，config `power_saving_idle_secs`）
     power_save_idle_secs: u64,
     /// 已渲染帧计数（省电时隔帧渲染的除法基准）
@@ -178,6 +184,9 @@ impl PetWindow {
             #[cfg(target_os = "windows")]
             opacity,
             last_interaction: Instant::now(),
+            lock_position: crate::config::get_bool("lock_position").unwrap_or(false),
+            shift_drag_only: crate::config::get_bool("shift_drag_only").unwrap_or(false),
+            modifiers: winit::keyboard::ModifiersState::default(),
             power_save_idle_secs: crate::config::get_i64("power_saving_idle_secs")
                 .map_or(0, |v| v.max(0) as u64),
             render_step: 0,
@@ -662,13 +671,22 @@ impl PetWindow {
                 self.resize_surface();
                 None
             }
+            WindowEvent::ModifiersChanged(m) => {
+                self.modifiers = m.state();
+                None
+            }
             _ => None,
         }
     }
 
     /// 左键按下：双击多开判定，否则进入拖拽
     fn on_left_press(&mut self) -> Option<WindowRequest> {
-        match self.input.press(Instant::now(), self.cursor_local) {
+        let drag_allowed =
+            !self.lock_position && (!self.shift_drag_only || self.modifiers.shift_key());
+        match self
+            .input
+            .press(Instant::now(), self.cursor_local, drag_allowed)
+        {
             Action::DoubleClick => {
                 let at = self.spawn_pos_near_cursor();
                 let _ = self.proxy.send_event(UserEvent::SpawnPet { at: Some(at) });
@@ -687,9 +705,12 @@ impl PetWindow {
             self.window.set_cursor(CursorIcon::Default);
             if action == Action::Click {
                 self.velocity = (0.0, 0.0); // 单击不走惯性
-                self.play_oneshot_in("click");
             }
             // 否则保持 Mode::Drag，速度交给物理世界飞行，落稳后由物理侧收尾回 Idle
+        }
+        // 锁定/仅 SHIFT 模式下没有拖拽也照常播点击动画
+        if action == Action::Click {
+            self.play_oneshot_in("click");
         }
         None
     }

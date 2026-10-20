@@ -39,7 +39,8 @@ pub struct InputState {
 impl InputState {
     /// 左键按下。`pos` 为窗口内逻辑坐标；返回 [`Action::DragStart`] 时
     /// `offset` 即抓取偏移。
-    pub fn press(&mut self, now: Instant, pos: (f64, f64)) -> Action {
+    /// `drag_allowed` 为 false（锁定了位置，或仅限 SHIFT 拖动而修饰键没按下）时只记录按压状态、不受理拖拽，单击与双击的判定不受影响。
+    pub fn press(&mut self, now: Instant, pos: (f64, f64), drag_allowed: bool) -> Action {
         if let Some(t) = self.last_press
             && now.duration_since(t).as_secs_f64() < DOUBLE_CLICK_SECS
         {
@@ -50,7 +51,11 @@ impl InputState {
         self.last_press = Some(now);
         self.press_pos = pos;
         self.suppress_single = false;
-        Action::DragStart { offset: pos }
+        if drag_allowed {
+            Action::DragStart { offset: pos }
+        } else {
+            Action::None
+        }
     }
 
     /// 左键松开。无论结果如何都会推进内部状态（清抑制标志），
@@ -85,7 +90,7 @@ mod tests {
         let mut s = InputState::default();
         let t0 = Instant::now();
         assert_eq!(
-            s.press(t0, (10.0, 20.0)),
+            s.press(t0, (10.0, 20.0), true),
             Action::DragStart {
                 offset: (10.0, 20.0)
             }
@@ -98,11 +103,11 @@ mod tests {
     fn long_press_boundary_not_click() {
         let mut s = InputState::default();
         let t0 = Instant::now();
-        s.press(t0, (5.0, 5.0));
+        s.press(t0, (5.0, 5.0), true);
         // 恰好 CLICK_SECS：严格小于才判，边界不判
         assert_eq!(s.release(at(t0, CLICK_SECS), (5.0, 5.0)), Action::None);
         // 明显长按
-        s.press(at(t0, 1.0), (5.0, 5.0));
+        s.press(at(t0, 1.0), (5.0, 5.0), true);
         assert_eq!(s.release(at(t0, 2.0), (5.0, 5.0)), Action::None);
     }
 
@@ -110,11 +115,11 @@ mod tests {
     fn move_threshold_boundary() {
         let mut s = InputState::default();
         let t0 = Instant::now();
-        s.press(t0, (0.0, 0.0));
+        s.press(t0, (0.0, 0.0), true);
         // 位移恰好 6px：不判
         assert_eq!(s.release(at(t0, 0.1), (CLICK_MOVE_PX, 0.0)), Action::None);
         // 略小于阈值：判（斜向距离 5px < 6）
-        s.press(at(t0, 1.0), (0.0, 0.0));
+        s.press(at(t0, 1.0), (0.0, 0.0), true);
         assert_eq!(s.release(at(t0, 1.1), (3.0, 4.0)), Action::Click);
     }
 
@@ -122,10 +127,10 @@ mod tests {
     fn double_click_suppresses_release() {
         let mut s = InputState::default();
         let t0 = Instant::now();
-        s.press(t0, (8.0, 8.0));
+        s.press(t0, (8.0, 8.0), true);
         assert_eq!(s.release(at(t0, 0.1), (8.0, 8.0)), Action::Click);
         // 距第一次按下 0.39s < 0.4：双击（基准是上次按下，不是松开）
-        assert_eq!(s.press(at(t0, 0.39), (8.0, 8.0)), Action::DoubleClick);
+        assert_eq!(s.press(at(t0, 0.39), (8.0, 8.0), true), Action::DoubleClick);
         // 双击后的松开即使短按未位移也不判单击
         assert_eq!(s.release(at(t0, 0.45), (8.0, 8.0)), Action::None);
     }
@@ -134,11 +139,11 @@ mod tests {
     fn double_click_window_boundary() {
         let mut s = InputState::default();
         let t0 = Instant::now();
-        s.press(t0, (0.0, 0.0));
+        s.press(t0, (0.0, 0.0), true);
         s.release(at(t0, 0.1), (0.0, 0.0));
         // 恰好 0.4s：严格小于才判双击，边界为普通按下
         assert_eq!(
-            s.press(at(t0, DOUBLE_CLICK_SECS), (1.0, 1.0)),
+            s.press(at(t0, DOUBLE_CLICK_SECS), (1.0, 1.0), true),
             Action::DragStart { offset: (1.0, 1.0) }
         );
     }
@@ -147,11 +152,11 @@ mod tests {
     fn third_click_of_triple_is_plain_press() {
         let mut s = InputState::default();
         let t0 = Instant::now();
-        s.press(t0, (0.0, 0.0));
-        assert_eq!(s.press(at(t0, 0.2), (0.0, 0.0)), Action::DoubleClick);
+        s.press(t0, (0.0, 0.0), true);
+        assert_eq!(s.press(at(t0, 0.2), (0.0, 0.0), true), Action::DoubleClick);
         // 双击已清空基准：第三次按下（仍在 0.4s 内）按普通按下处理
         assert_eq!(
-            s.press(at(t0, 0.3), (2.0, 2.0)),
+            s.press(at(t0, 0.3), (2.0, 2.0), true),
             Action::DragStart { offset: (2.0, 2.0) }
         );
     }
@@ -169,5 +174,51 @@ mod tests {
     fn distance_is_euclidean() {
         assert!((dist((0.0, 0.0), (3.0, 4.0)) - 5.0).abs() < 1e-9);
         assert!((dist((1.0, 1.0), (1.0, 1.0)) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn drag_disallowed_blocks_dragstart_keeps_click() {
+        let t0 = Instant::now();
+        let mut s = InputState::default();
+        // 锁定且未按 shift：按下不受理拖拽
+        assert_eq!(s.press(t0, (10.0, 10.0), false), Action::None);
+        // 短按且没有位移，仍然判为单击
+        assert_eq!(
+            s.release(at(t0, CLICK_SECS / 2.0), (10.0, 10.0)),
+            Action::Click
+        );
+    }
+
+    #[test]
+    fn drag_disallowed_keeps_double_click() {
+        let t0 = Instant::now();
+        let mut s = InputState::default();
+        assert_eq!(s.press(t0, (0.0, 0.0), false), Action::None);
+        assert_eq!(s.press(at(t0, 0.1), (0.0, 0.0), false), Action::DoubleClick);
+    }
+
+    #[test]
+    fn drag_policy_matrix() {
+        // 矩阵含义：(锁定, 仅限shift, 按住了shift) 时拖拽是否受理
+        let cases = [
+            (false, false, false, true), // 两个开关都关：普通拖拽
+            (false, false, true, true),  // 两个开关都关且按住 shift：照常受理
+            (false, true, false, false), // 仅限 shift 模式而没按 shift：拒绝
+            (false, true, true, true),   // 仅限 shift 模式且按住 shift：受理
+            (true, false, false, false), // 锁定：拒绝
+            (true, true, true, false),   // 锁定优先于仅限 shift 模式：拒绝
+        ];
+        for (lock, shift_only, shift_held, expect) in cases {
+            let allowed = !lock && (!shift_only || shift_held);
+            assert_eq!(
+                allowed, expect,
+                "lock={lock} shift_only={shift_only} held={shift_held}"
+            );
+            let t0 = Instant::now();
+            let mut s = InputState::default();
+            let action = s.press(t0, (5.0, 5.0), allowed);
+            let is_drag = matches!(action, Action::DragStart { .. });
+            assert_eq!(is_drag, expect);
+        }
     }
 }
