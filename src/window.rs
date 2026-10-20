@@ -734,6 +734,39 @@ impl PetWindow {
     pub fn id(&self) -> WindowId {
         self.window.id()
     }
+
+    /// 位置存档的快照：显示器指纹加显示器内逻辑坐标
+    pub fn position_snapshot(&self) -> Option<crate::positions::PetPos> {
+        let m = self.window.current_monitor()?;
+        let g: LogicalPosition<f64> = self
+            .window
+            .outer_position()
+            .ok()?
+            .to_logical(self.window.scale_factor());
+        let origin: LogicalPosition<f64> = m.position().to_logical(m.scale_factor());
+        Some(crate::positions::PetPos {
+            monitor: crate::positions::monitor_fingerprint(
+                m.name().as_deref(),
+                (m.size().width, m.size().height),
+            ),
+            x: g.x - origin.x,
+            y: g.y - origin.y,
+        })
+    }
+
+    /// 把窗口挪到指定显示器的存档坐标（等待的显示器上线后调用）
+    pub fn move_to_monitor(&self, m: &winit::monitor::MonitorHandle, x: f64, y: f64) {
+        let origin: LogicalPosition<f64> = m.position().to_logical(m.scale_factor());
+        let size: LogicalSize<f64> = m.size().to_logical(m.scale_factor());
+        let (gx, gy) = crate::positions::to_global(
+            (origin.x, origin.y),
+            (size.width, size.height),
+            x,
+            y,
+            (WIN_W, WIN_H),
+        );
+        self.window.set_outer_position(LogicalPosition::new(gx, gy));
+    }
 }
 
 /// 镜像 blit：逐行水平翻转（透明度随像素翻转，命中测试同步翻转采样）

@@ -18,6 +18,7 @@ mod library;
 mod logging;
 mod physics;
 mod platform;
+mod positions;
 mod render;
 mod tray;
 mod window;
@@ -44,6 +45,12 @@ pub enum UserEvent {
     ExitApp,
 }
 
+/// 等待目标显示器上线的恢复任务
+struct PendingRestore {
+    pet: WindowId,
+    pos: positions::PetPos,
+}
+
 struct App {
     lib: Arc<Library>,
     /// 可用角色（内置 + 外部目录）
@@ -56,6 +63,13 @@ struct App {
     /// 碰撞世界（`pets` 与 `physics.pets` 按下标一一对应）
     physics: physics::World,
     last_phys_at: Instant,
+    /// 启动时待恢复的存档位置，按顺序取用
+    restore_queue: std::collections::VecDeque<positions::PetPos>,
+    /// 目标显示器还没上线的宠物；它们暂时落在主屏，临时坐标不写入存档
+    pending_restore: Vec<PendingRestore>,
+    /// 上次写入存档的序列化结果；内容没变就不重写
+    last_saved_positions: String,
+    last_pos_check: Instant,
     // muda::Menu 非 Send/Sync，用 Rc 即可（仅主线程使用）
     ctx_menu: std::rc::Rc<muda::Menu>,
     #[allow(dead_code)] // 托盘句柄需保活
@@ -364,6 +378,49 @@ fn monitor_bounds(mon: Option<winit::monitor::MonitorHandle>) -> physics::Bounds
     }
 }
 
+/// 把存档位置换算成全局逻辑坐标：显示器在线就用它的原点，离线时先落主屏并标记等待。
+/// 返回 (全局坐标, 是否在等待目标显示器)
+fn restore_to_global(
+    event_loop: &ActiveEventLoop,
+    saved: &positions::PetPos,
+) -> ((f64, f64), bool) {
+    let monitors: Vec<_> = event_loop.available_monitors().collect();
+    let online: Vec<String> = monitors
+        .iter()
+        .map(|m| {
+            positions::monitor_fingerprint(m.name().as_deref(), (m.size().width, m.size().height))
+        })
+        .collect();
+    let primary = event_loop
+        .primary_monitor()
+        .and_then(|p| online.iter().position(|f| *f == fingerprint_of(&p)))
+        .unwrap_or(0);
+    let (idx, waiting) = positions::resolve(saved, &online, primary);
+    match monitors.get(idx) {
+        Some(m) => (monitor_relative_to_global(m, saved.x, saved.y), waiting),
+        None => ((240.0, 160.0), waiting),
+    }
+}
+
+/// 计算 `MonitorHandle` 的显示器指纹
+fn fingerprint_of(m: &winit::monitor::MonitorHandle) -> String {
+    positions::monitor_fingerprint(m.name().as_deref(), (m.size().width, m.size().height))
+}
+
+/// 把显示器内坐标换算成全局逻辑坐标（并夹在该显示器范围内）
+fn monitor_relative_to_global(m: &winit::monitor::MonitorHandle, x: f64, y: f64) -> (f64, f64) {
+    let scale = m.scale_factor();
+    let origin: winit::dpi::LogicalPosition<f64> = m.position().to_logical(scale);
+    let size: winit::dpi::LogicalSize<f64> = m.size().to_logical(scale);
+    positions::to_global(
+        (origin.x, origin.y),
+        (size.width, size.height),
+        x,
+        y,
+        (window::WIN_W, window::WIN_H),
+    )
+}
+
 impl App {
     /// 切换角色：重新加载该角色的 `Library` 并对所有窗口生效，同时更新托盘图标和菜单里的当前角色标记，并记住这次的选择
     fn switch_character(&mut self, char_id: &str) {
@@ -431,9 +488,20 @@ impl App {
             log::warn!("窗口数量已达上限 {MAX_PETS}，忽略新增请求");
             return;
         }
+        // 位置的优先级：先显式指定，其次首窗的环境变量，再是存档恢复，最后随机落位
+        let mut deferred = None;
         let pos = at.or_else(|| {
             parse_pos_env()
                 .filter(|_| self.pets.is_empty())
+                .or_else(|| {
+                    self.restore_queue.pop_front().map(|saved| {
+                        let (global, waiting) = restore_to_global(event_loop, &saved);
+                        if waiting {
+                            deferred = Some(saved);
+                        }
+                        global
+                    })
+                })
                 .or_else(|| Some(default_spawn_pos(event_loop)))
         });
         // 多开随机起始相位
@@ -452,6 +520,13 @@ impl App {
                     pet.id(),
                     self.pets.len() + 1
                 );
+                if let Some(saved) = deferred {
+                    // 目标显示器暂不在线：先落主屏，等它上线再挪过去；期间的临时坐标不写入存档
+                    self.pending_restore.push(PendingRestore {
+                        pet: pet.id(),
+                        pos: saved,
+                    });
+                }
                 let body_pos = pet.window_pos_logical().unwrap_or((240.0, 160.0));
                 self.physics.pets.push(physics::PetBody::new(body_pos));
                 self.pets.push(pet);
@@ -507,7 +582,10 @@ impl App {
             }
             MENU_LOGS => open_in_file_manager(&logging::log_dir()),
             MENU_AUTOSTART => self.toggle_autostart(),
-            MENU_EXIT => event_loop.exit(),
+            MENU_EXIT => {
+                self.save_positions();
+                event_loop.exit();
+            }
             _ if let Some(char_id) = id.strip_prefix(MENU_CHAR_PREFIX) => {
                 self.switch_character(char_id);
             }
@@ -557,7 +635,10 @@ impl ApplicationHandler<UserEvent> for App {
                     log::debug!("触发被拒绝：{spec}");
                 }
             }
-            UserEvent::ExitApp => event_loop.exit(),
+            UserEvent::ExitApp => {
+                self.save_positions();
+                event_loop.exit();
+            }
         }
     }
 
@@ -629,6 +710,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         self.step_physics(now);
+        self.maintain_positions(event_loop, now);
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
@@ -648,6 +730,48 @@ impl App {
         self.physics.step(dt);
         for (pet, body) in self.pets.iter_mut().zip(self.physics.pets.iter_mut()) {
             pet.apply_body(body);
+        }
+    }
+
+    /// 位置记忆的定期维护（两秒节流）：等待中的显示器一旦上线就把宠物挪回去；位置快照有变化才写入存档
+    fn maintain_positions(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        if now.duration_since(self.last_pos_check) < Duration::from_secs(2) {
+            return;
+        }
+        self.last_pos_check = now;
+
+        if !self.pending_restore.is_empty() {
+            let monitors: Vec<_> = event_loop.available_monitors().collect();
+            let online: Vec<String> = monitors.iter().map(fingerprint_of).collect();
+            self.pending_restore.retain(|p| {
+                let Some(i) = online.iter().position(|f| *f == p.pos.monitor) else {
+                    return true; // 还没上线，继续等
+                };
+                if let Some(pet) = self.pets.iter().find(|w| w.id() == p.pet) {
+                    pet.move_to_monitor(&monitors[i], p.pos.x, p.pos.y);
+                    log::info!("目标显示器已上线，恢复宠物位置：{}", p.pos.monitor);
+                }
+                false // 已恢复（或窗口已关闭）
+            });
+        }
+
+        self.save_positions();
+    }
+
+    /// 把位置快照写入存档；还在等待显示器的宠物跳过，内容没变不重写
+    fn save_positions(&mut self) {
+        let waiting: Vec<WindowId> = self.pending_restore.iter().map(|p| p.pet).collect();
+        let snapshot: Vec<_> = self
+            .pets
+            .iter()
+            .filter_map(|pet| pet.position_snapshot().map(|p| (pet.id(), p)))
+            .collect();
+        let saved = positions::filter_saved(&snapshot, &waiting);
+        let value = positions::to_value(&saved);
+        let json = value.to_string();
+        if json != self.last_saved_positions {
+            self.last_saved_positions = json;
+            config::set("pet_positions", value);
         }
     }
 }
@@ -676,6 +800,7 @@ pub fn build_info() -> String {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     match logging::init() {
         Some(path) => log::info!("日志文件：{}", path.display()),
@@ -772,6 +897,14 @@ fn main() {
             height: 0.0,
         }),
         last_phys_at: Instant::now(),
+        restore_queue: config::get("pet_positions")
+            .as_ref()
+            .map(positions::from_value)
+            .unwrap_or_default()
+            .into(),
+        pending_restore: Vec::new(),
+        last_saved_positions: String::new(),
+        last_pos_check: Instant::now(),
         ctx_menu,
         tray,
         menu_target: None,
