@@ -66,6 +66,9 @@ pub struct PetWindow {
     walk_stride: f64,
     walk_last_curve: f64,
 
+    /// 窗口整体不透明度（Windows 提交分层窗口时随帧携带；macOS 一次设置即持续生效）
+    #[cfg(target_os = "windows")]
+    opacity: f64,
     /// 最近一次交互时刻（省电判定用）
     last_interaction: Instant,
     /// 省电阈值秒数（0=关闭，config `power_saving_idle_secs`）
@@ -147,6 +150,9 @@ impl PetWindow {
             anim.frame_idx = frame_offset % anim.frame_len().max(1);
         }
 
+        // config 的不透明度（缺省 1.0），钳制在 config 侧完成
+        let opacity = crate::config::get_f64("opacity").map_or(1.0, crate::config::clamp_opacity);
+        platform::set_window_opacity(&window, opacity);
         let mut pet = Self {
             window,
             surface,
@@ -169,6 +175,8 @@ impl PetWindow {
             input: InputState::default(),
             walk_stride: 0.0,
             walk_last_curve: 0.0,
+            #[cfg(target_os = "windows")]
+            opacity,
             last_interaction: Instant::now(),
             power_save_idle_secs: crate::config::get_i64("power_saving_idle_secs")
                 .map_or(0, |v| v.max(0) as u64),
@@ -196,8 +204,10 @@ impl PetWindow {
         #[cfg(not(target_os = "windows"))]
         let r = self.surface.render(&self.gpu);
         #[cfg(target_os = "windows")]
+        let alpha = (self.opacity * 255.0) as u8;
+        #[cfg(target_os = "windows")]
         let r = if let (Some(h), Some(b)) = (self.hwnd, self.bitmap.as_mut()) {
-            self.surface.render(&self.gpu, h, b)
+            self.surface.render(&self.gpu, h, b, alpha)
         } else {
             log::error!("Windows 渲染上下文缺失（hwnd/bitmap）");
             return;

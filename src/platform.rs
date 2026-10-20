@@ -212,8 +212,9 @@ pub mod windows_layered {
             true
         }
 
-        /// 提交给系统合成器（窗口内容整体替换；命中测试按位图 alpha）
-        pub fn present(&self, hwnd: HWND) -> bool {
+        /// 提交给系统合成器（窗口内容整体替换；命中测试按位图 alpha）。
+        /// `alpha` 为整体不透明度（0–255），乘进 `SourceConstantAlpha`
+        pub fn present(&self, hwnd: HWND, alpha: u8) -> bool {
             unsafe {
                 let size = SIZE {
                     cx: self.w,
@@ -223,7 +224,7 @@ pub mod windows_layered {
                 let blend = BLENDFUNCTION {
                     BlendOp: AC_SRC_OVER as u8,
                     BlendFlags: 0,
-                    SourceConstantAlpha: 255,
+                    SourceConstantAlpha: alpha,
                     AlphaFormat: AC_SRC_ALPHA as u8,
                 };
                 UpdateLayeredWindow(
@@ -240,6 +241,20 @@ pub mod windows_layered {
                 .is_ok()
             }
         }
+    }
+}
+
+/// 设置窗口整体不透明度（0.0–1.0）。
+/// macOS 走 `NSWindow.alphaValue`，设置一次持续生效；Windows 在分层窗口提交时由 `SourceConstantAlpha` 承担（见 `LayeredBitmap::present`），这里无需做事；Linux 未实现。
+pub fn set_window_opacity(window: &Window, opacity: f64) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        with_ns_window(window, |w| w.setAlphaValue(opacity)).is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, opacity);
+        true
     }
 }
 
