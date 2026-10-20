@@ -21,6 +21,7 @@ mod physics;
 mod platform;
 mod positions;
 mod render;
+mod text;
 mod tray;
 mod tts;
 mod window;
