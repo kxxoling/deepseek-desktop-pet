@@ -118,6 +118,17 @@ fn overlap(a: Rect, b: Rect) -> (f64, f64) {
     )
 }
 
+/// 每次小步计算允许的最大位移（半个身位）；一帧的位移超过它就把这帧拆成多个小步，高速或掉帧时不会穿透
+pub const MAX_STEP_DIST: f64 = 54.0;
+/// 甩出力度倍率范围（config `throw_strength`）
+pub const THROW_STRENGTH_MIN: f64 = 0.25;
+pub const THROW_STRENGTH_MAX: f64 = 3.0;
+
+/// 把甩出力度钳制到合法的倍率范围
+pub fn clamp_throw_strength(v: f64) -> f64 {
+    v.clamp(THROW_STRENGTH_MIN, THROW_STRENGTH_MAX)
+}
+
 pub struct World {
     pub pets: Vec<PetBody>,
     pub bounds: Bounds,
@@ -132,7 +143,21 @@ impl World {
     }
 
     /// 推进一帧：积分、碰撞、越界钳制。相同的输入一定得到相同的输出，没有随机。
+    /// 内部按最大速度把一帧拆成多个小步计算，防止高速时一步跨过别的宠物造成穿透
     pub fn step(&mut self, dt: f64) {
+        let max_speed = self
+            .pets
+            .iter()
+            .map(|p| p.vel.0.hypot(p.vel.1))
+            .fold(0.0, f64::max);
+        let steps = ((max_speed * dt / MAX_STEP_DIST).ceil() as usize).clamp(1, 8);
+        let sub = dt / steps as f64;
+        for _ in 0..steps {
+            self.step_inner(sub);
+        }
+    }
+
+    fn step_inner(&mut self, dt: f64) {
         for p in &mut self.pets {
             match p.state {
                 PetState::Resting => p.vel = (0.0, 0.0),
@@ -252,12 +277,12 @@ fn clamp_to_bounds(p: &mut PetBody, bounds: Bounds) {
 mod tests {
     use super::*;
 
-    const BOUNDS: Bounds = Bounds {
+    pub(super) const BOUNDS: Bounds = Bounds {
         width: 1920.0,
         height: 1080.0,
     };
 
-    fn approx(a: f64, b: f64) {
+    pub(super) fn approx(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
     }
 
@@ -470,5 +495,43 @@ mod tests {
         w.step(0.0);
         assert_eq!(w.pets[0].pos, (100.0, 100.0));
         assert_eq!(w.pets[1].pos, (110.0, 100.0));
+    }
+}
+
+#[cfg(test)]
+mod throw_tests {
+    use super::tests::{BOUNDS, approx};
+    use super::*;
+
+    #[test]
+    fn clamp_throw_strength_bounds() {
+        assert_eq!(clamp_throw_strength(0.01), THROW_STRENGTH_MIN);
+        assert_eq!(clamp_throw_strength(99.0), THROW_STRENGTH_MAX);
+        assert_eq!(clamp_throw_strength(1.5), 1.5);
+    }
+
+    #[test]
+    fn high_speed_pet_does_not_tunnel_through_resting() {
+        // 一帧位移 200pt，超过身宽 108；不拆成小步会一步跨过静止的宠物
+        let mut w = World::new(BOUNDS);
+        let gap = 300.0;
+        w.pets.push(PetBody::flying((0.0, 100.0), (6000.0, 0.0)));
+        w.pets.push(PetBody::new((gap, 100.0)));
+        w.step(1.0 / 30.0);
+        // 被撞到的宠物应脱离静止（得到速度），说明碰撞发生了
+        assert_eq!(w.pets[1].state, PetState::Flying);
+        assert!(w.pets[1].vel.0 > 0.0);
+    }
+
+    #[test]
+    fn substep_matches_single_step_at_low_speed() {
+        // 低速时不拆分（steps 为 1），行为和整帧直接计算一致
+        let mut w = World::new(BOUNDS);
+        w.pets.push(PetBody::flying((100.0, 100.0), (60.0, 0.0)));
+        let dt = 0.1;
+        let steps = ((60.0f64.hypot(0.0) * dt / MAX_STEP_DIST).ceil() as usize).clamp(1, 8);
+        assert_eq!(steps, 1);
+        w.step(dt);
+        approx(w.pets[0].pos.0, 100.0 + 60.0 * dt);
     }
 }
