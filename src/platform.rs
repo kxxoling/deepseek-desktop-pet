@@ -258,6 +258,68 @@ pub fn set_window_opacity(window: &Window, opacity: f64) -> bool {
     }
 }
 
+/// 检测当前是否有应用在全屏模式（macOS 判定依据：菜单栏隐藏时
+/// `visibleFrame` 的高度约等于 `frame` 的高度；非全屏时菜单栏和 Dock 占几十像素）
+pub fn any_app_fullscreen() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::MainThreadMarker;
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let Some(screen) = objc2_app_kit::NSScreen::mainScreen(mtm) else {
+            return false;
+        };
+        let frame = screen.frame();
+        let visible = screen.visibleFrame();
+        // 全屏时菜单栏和 Dock 都藏了，可见区域基本等于整块屏幕
+        (frame.size.height - visible.size.height) < 4.0
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_STYLE, GetForegroundWindow, GetWindowLongW, GetWindowRect, WS_CAPTION,
+        };
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_invalid() {
+                return false;
+            }
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, std::ptr::from_mut(&mut rect)).is_err() {
+                return false;
+            }
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, std::ptr::from_mut(&mut info)).as_bool() {
+                return false;
+            }
+            // 前台窗口盖满整块显示器
+            let covers = rect.left <= info.rcMonitor.left
+                && rect.top <= info.rcMonitor.top
+                && rect.right >= info.rcMonitor.right
+                && rect.bottom >= info.rcMonitor.bottom;
+            // 且没有标题栏（有标题栏的是最大化，不算全屏——自动隐藏任务栏下的
+            // 最大化窗口仍带标题栏，上游踩过的坑）
+            let style = GetWindowLongW(hwnd, GWL_STYLE);
+            let has_caption = (style & WS_CAPTION.0 as i32) != 0;
+            covers && !has_caption
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // Linux 需要 X11 属性查询（_NET_WM_STATE_FULLSCREEN），当前无 X11 绑定依赖，先返回 false
+        false
+    }
+}
+
 /// 在窗口内指定位置（物理像素，左上原点）弹出上下文菜单
 pub fn show_context_menu(menu: &muda::Menu, window: &Window, x: i32, y: i32) -> bool {
     #[cfg(target_os = "macos")]
