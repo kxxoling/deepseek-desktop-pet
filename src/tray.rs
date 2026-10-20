@@ -50,7 +50,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 图标生成() {
+    fn icon_generated() {
         // 全透明帧
         let _icon1 = tray_icon_from_frame(&vec![0u8; crate::library::FRAME_BYTES]);
         // 含不透明像素的帧

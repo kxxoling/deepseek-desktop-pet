@@ -76,7 +76,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn 无效环境变量时继续默认探测() {
+    fn invalid_env_falls_back_to_default_probe() {
         ensure_logger();
         let _guard = ENV_LOCK
             .lock()
@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn 默认探测命中工作目录资产() {
+    fn default_probe_finds_cwd_assets() {
         ensure_logger();
         let _guard = ENV_LOCK
             .lock()
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn 环境变量指定的资产目录优先() {
+    fn env_dir_takes_priority() {
         ensure_logger();
         let _guard = ENV_LOCK
             .lock()

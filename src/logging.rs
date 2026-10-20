@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn 日志目录_环境变量优先() {
+    fn log_dir_env_takes_priority() {
         let root = temp_root("dir");
         unsafe {
             std::env::set_var("DS_PET_LOG_DIR", &root);
@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn 超限轮转_保留一代_未超限不动() {
+    fn rotate_over_limit_keeps_one() {
         let root = temp_root("rotate");
         std::fs::create_dir_all(&root).unwrap();
         let log = root.join("ds-pet.log");
@@ -187,7 +187,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn 默认日志目录为平台约定() {
+    fn default_log_dir_matches_platform() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -201,7 +201,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn init落盘与二次调用幂等() {
+    fn init_writes_and_is_idempotent() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -225,7 +225,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn 目录不可建时init返回none() {
+    fn init_returns_none_when_dir_unbuildable() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -249,7 +249,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn tee双写文件与stderr() {
+    fn tee_writes_file_and_stderr() {
         use std::io::Write as _;
         let root = temp_root("tee");
         std::fs::create_dir_all(&root).unwrap();
@@ -270,7 +270,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn 轮转目标被占用时告警不中断() {
+    fn occupied_rotation_warns_not_panics() {
         let root = temp_root("rotfail");
         std::fs::create_dir_all(&root).unwrap();
         let log = root.join("ds-pet.log");
@@ -282,7 +282,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn 轮转边界恰好不超限() {
+    fn rotation_boundary_exactly_at_limit() {
         let root = temp_root("rotedge");
         std::fs::create_dir_all(&root).unwrap();
         let log = root.join("ds-pet.log");

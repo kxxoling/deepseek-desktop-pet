@@ -995,7 +995,7 @@ mod tests {
     use crate::library::FRAME_BYTES;
 
     #[test]
-    fn 镜像二次翻转复原() {
+    fn mirror_twice_restores() {
         let src: Vec<u8> = (0..FRAME_BYTES).map(|i| (i % 251) as u8).collect();
         let mut once = vec![0u8; FRAME_BYTES];
         mirror_blit(&mut once, &src);
@@ -1005,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn 镜像交换同行首尾像素且保留alpha() {
+    fn mirror_swaps_row_ends_keeps_alpha() {
         let mut src = vec![0u8; FRAME_BYTES];
         src[0..4].copy_from_slice(&[1, 2, 3, 200]);
         // 第 0 行最后一列（不是整个缓冲区的末尾，那是最后一行的行尾）

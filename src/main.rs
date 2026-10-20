@@ -1010,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn 构建标识包含版本与哈希() {
+    fn build_info_contains_version_and_hash() {
         let info = build_info();
         assert!(info.starts_with('v'), "以 v 开头：{info}");
         assert!(
@@ -1031,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn 位置环境变量解析() {
+    fn position_env_parsing() {
         unsafe {
             std::env::set_var("DS_PET_POS", "300,400.5");
         }

@@ -432,7 +432,7 @@ mod from_flat_tests {
 
     #[test]
     #[should_panic(expected = "assertion failed")]
-    fn 空数据断言失败() {
+    fn empty_data_is_rejected() {
         let _ = ClipFrames::from_flat(Vec::new());
     }
 }
@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn zst_快加载_连续缓冲_首帧流式读取() {
+    fn zst_fast_load_streaming_first_frame() {
         ensure_logger();
         let root = temp_root("zst");
         let clip_dir = root.join("assets/frames/idle/呼吸");
@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn 帧目录缺失或为空时报错() {
+    fn missing_or_empty_frames_dir_errors() {
         let root = temp_root("empty");
         std::fs::create_dir_all(root.join("assets/frames")).unwrap();
         assert!(Library::load(&root.join("assets")).is_err());
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn 非法zst返回none() {
+    fn corrupt_zst_returns_none() {
         ensure_logger();
         let root = temp_root("badzst");
         let clip_dir = root.join("assets/frames/idle/x");
@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn 损坏png返回none() {
+    fn corrupt_png_returns_none() {
         let root = temp_root("badpng");
         let clip_dir = root.join("assets/frames/idle/x");
         std::fs::create_dir_all(&clip_dir).unwrap();
@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn 活跃缓存命中与登记() {
+    fn active_cache_hit_and_register() {
         ensure_logger();
         let root = temp_root("cache");
         let clip_dir = root.join("assets/frames/idle/x");
@@ -667,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn 截断png解码失败() {
+    fn truncated_png_decode_fails() {
         let root = temp_root("trunc");
         let clip_dir = root.join("assets/frames/idle/x");
         std::fs::create_dir_all(&clip_dir).unwrap();
@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn 加载中重复请求不重复起线程() {
+    fn duplicate_load_reuses_thread() {
         let root = temp_root("dedup");
         let clip_dir = root.join("assets/frames/idle/x");
         std::fs::create_dir_all(&clip_dir).unwrap();
@@ -711,13 +711,13 @@ mod tests {
     }
 
     #[test]
-    fn clipid显示为路径() {
+    fn clipid_displays_as_path() {
         let id = ClipId(Arc::from("idle/x"));
         assert_eq!(format!("{id}"), "idle/x");
     }
 
     #[test]
-    fn png读取失败与尺寸异常() {
+    fn png_read_error_and_odd_size() {
         let mut out = Vec::new();
         assert!(!decode_png_into(
             Path::new("/nonexistent/f0000.png"),
@@ -741,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn zst读取失败与scan错误分支() {
+    fn zst_read_error_and_scan_branches() {
         let root = temp_root("zstmiss");
         let clip_dir = root.join("assets/frames/idle/x");
         std::fs::create_dir_all(&clip_dir).unwrap();
@@ -763,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn 帧目录不存在时报错() {
+    fn absent_frames_dir_errors() {
         let root = temp_root("nodir");
         std::fs::create_dir_all(&root).unwrap();
         assert!(Library::load(&root.join("assets")).is_err());
@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn 元数据坏json被忽略() {
+    fn bad_meta_json_ignored() {
         let root = temp_root("badjson");
         let frames = root.join("assets/frames");
         std::fs::create_dir_all(frames.join("idle/x")).unwrap();
@@ -788,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn 加载失败清理loading允许重试() {
+    fn failed_load_clears_loading_for_retry() {
         ensure_logger();
         let root = temp_root("retry");
         let clip_dir = root.join("assets/frames/idle/x");

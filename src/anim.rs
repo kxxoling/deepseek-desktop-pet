@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn curve_at_按时间线性插值() {
+    fn curve_at_interpolates_by_time() {
         let curve = vec![0.0, 0.5, 1.0];
         // 15fps 输出帧 1 对应源帧 1*24/15=1.6：0.5 与 1.0 之间 0.6 处 → 0.8
         assert!((curve_at(&curve, 1) - 0.8).abs() < 1e-9);
@@ -434,13 +434,13 @@ mod tests {
     }
 
     #[test]
-    fn curve_at_超界钳制到末尾() {
+    fn curve_at_clamps_beyond_end() {
         let curve = vec![0.0, 0.5, 1.0];
         assert!((curve_at(&curve, 100) - 1.0).abs() < 1e-9);
     }
 
     #[test]
-    fn curve_at_线性曲线保持单调() {
+    fn curve_at_linear_stays_monotonic() {
         let curve: Vec<f64> = (0..=240).map(|i| f64::from(i) / 240.0).collect();
         let mut prev = f64::MIN;
         for f in 0..150 {
@@ -469,7 +469,7 @@ mod state_tests {
     }
 
     #[test]
-    fn 初始状态() {
+    fn initial_state() {
         let a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -484,7 +484,7 @@ mod state_tests {
     }
 
     #[test]
-    fn 未加载时显示首帧并排队() {
+    fn unloaded_shows_first_frame_and_queues() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -509,21 +509,21 @@ mod state_tests {
     }
 
     #[test]
-    fn 到货但不匹配则丢弃() {
+    fn mismatched_load_discarded() {
         let mut a = Anim::new(&ClipId(Arc::from("idle/x")), first_frame(), None);
         assert!(!a.on_clip_loaded(&ClipId(Arc::from("other/z")), frames_n(1)));
         assert!(!a.is_loaded());
     }
 
     #[test]
-    fn 当前clip未加载时到货也接管() {
+    fn matching_load_takes_over_when_unloaded() {
         let mut a = Anim::new(&ClipId(Arc::from("idle/x")), first_frame(), None);
         // queued 为 None（构造时未排队），但 clip 匹配且 frames 空
         assert!(a.on_clip_loaded(&ClipId(Arc::from("idle/x")), frames_n(1)));
     }
 
     #[test]
-    fn enter_idle重排随机事件() {
+    fn enter_idle_reschedules_random_event() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -548,7 +548,7 @@ mod state_tests {
     }
 
     #[test]
-    fn tick初始化与未到时不推进() {
+    fn tick_init_and_wait_no_advance() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -564,7 +564,7 @@ mod state_tests {
     }
 
     #[test]
-    fn tick连续推进不重同步() {
+    fn tick_advances_without_resync() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -581,7 +581,7 @@ mod state_tests {
     }
 
     #[test]
-    fn tick推进与回绕() {
+    fn tick_advance_and_wrap() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -603,7 +603,7 @@ mod state_tests {
     }
 
     #[test]
-    fn tick落后超限重同步() {
+    fn tick_resyncs_when_too_far_behind() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -722,7 +722,7 @@ mod state_tests {
     }
 
     #[test]
-    fn oneshot播完返回finished() {
+    fn oneshot_returns_finished_at_end() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -744,7 +744,7 @@ mod state_tests {
     }
 
     #[test]
-    fn walk走完一圈返回() {
+    fn walk_returns_loop_done() {
         let mut a = Anim::new(
             &ClipId(Arc::from("idle/x")),
             first_frame(),
@@ -774,7 +774,7 @@ mod extra_tests {
     use super::*;
 
     #[test]
-    fn walkdir方向与翻转() {
+    fn walkdir_direction_and_mirror() {
         assert!((WalkDir::Left.sign() - (-1.0)).abs() < f64::EPSILON);
         assert!((WalkDir::Right.sign() - 1.0).abs() < f64::EPSILON);
         assert_eq!(WalkDir::Left.flip(), WalkDir::Right);
@@ -782,7 +782,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn random_pick空与非空() {
+    fn random_pick_empty_and_nonempty() {
         let empty: [u8; 0] = [];
         assert!(random_pick(&empty).is_none());
         let v = [10u8, 20];
@@ -791,7 +791,7 @@ mod extra_tests {
     }
 
     #[test]
-    fn rand_range在界内() {
+    fn rand_range_stays_in_bounds() {
         for _ in 0..100 {
             let r = rand_range(5.0, 7.0);
             assert!((5.0..=7.0).contains(&r));
