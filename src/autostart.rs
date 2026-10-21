@@ -7,6 +7,7 @@ pub const AUTOSTART_ID: &str = "com.ds-pet";
 
 /// macOS 的自启登记文件（LaunchAgent plist）内容
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn launchagent_plist(exe_path: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -29,6 +30,7 @@ pub fn launchagent_plist(exe_path: &str) -> String {
 
 /// Linux 的自启登记文件（XDG autostart 的 desktop 文件）内容
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn desktop_entry(exe_path: &str) -> String {
     format!(
         r"[Desktop Entry]
@@ -112,15 +114,17 @@ pub fn cleanup_stale() {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn entry_path() -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    let base = {
-        let home = std::env::var_os("HOME").unwrap_or_default();
-        std::path::PathBuf::from(home).join("Library/LaunchAgents")
-    };
-    #[cfg(not(target_os = "macos"))]
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    std::path::PathBuf::from(home)
+        .join("Library/LaunchAgents")
+        .join(format!("{AUTOSTART_ID}.plist"))
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn entry_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map_or_else(
             || {
                 let home = std::env::var_os("HOME").unwrap_or_default();
@@ -128,13 +132,8 @@ fn entry_path() -> std::path::PathBuf {
             },
             std::path::PathBuf::from,
         )
-        .join("autostart");
-    let name = if cfg!(target_os = "macos") {
-        format!("{AUTOSTART_ID}.plist")
-    } else {
-        "ds-pet.desktop".to_string()
-    };
-    base.join(name)
+        .join("autostart")
+        .join("ds-pet.desktop")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -144,8 +143,18 @@ fn current_exe() -> Option<String> {
         .map(|p| p.display().to_string())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn write_entry(exe: &str) -> bool {
+    write_file(launchagent_plist(exe))
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn write_entry(exe: &str) -> bool {
+    write_file(desktop_entry(exe))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_file(content: String) -> bool {
     let p = entry_path();
     let Some(dir) = p.parent() else {
         return false;
@@ -154,11 +163,6 @@ fn write_entry(exe: &str) -> bool {
         log::error!("创建自启目录失败：{}", dir.display());
         return false;
     }
-    let content = if cfg!(target_os = "macos") {
-        launchagent_plist(exe)
-    } else {
-        desktop_entry(exe)
-    };
     match std::fs::write(&p, content) {
         Ok(()) => true,
         Err(e) => {
@@ -380,15 +384,14 @@ X-GNOME-Autostart-enabled=true
     #[test]
     fn entry_path_matches_platform_convention() {
         let p = entry_path();
-        if cfg!(target_os = "macos") {
-            assert!(
-                p.ends_with("Library/LaunchAgents/com.ds-pet.plist"),
-                "{}",
-                p.display()
-            );
-        } else {
-            assert!(p.ends_with("ds-pet.desktop"), "{}", p.display());
-        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            p.ends_with("Library/LaunchAgents/com.ds-pet.plist"),
+            "{}",
+            p.display()
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(p.ends_with("ds-pet.desktop"), "{}", p.display());
     }
 
     // 幂等与清理的文件级行为（macOS 本机跑；CI 的 linux 走 cfg 分支同构）
