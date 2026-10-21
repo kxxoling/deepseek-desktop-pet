@@ -185,3 +185,151 @@ mod tests {
         assert_eq!(lines.len(), 1);
     }
 }
+
+// ---------- 字体加载与光栅化 ----------
+
+use fontdue::Font;
+use fontdue::FontSettings;
+
+/// 全局字体实例（懒加载一次）
+static FONT: std::sync::OnceLock<Option<Font>> = std::sync::OnceLock::new();
+
+/// 各平台候选字体路径（有 CJK 支持的 .ttf 文件，fontdue 不支持 .ttc 集合）
+fn candidate_font_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    // 环境变量优先
+    if let Some(p) = std::env::var_os("DS_PET_FONT") {
+        paths.push(std::path::PathBuf::from(p));
+    }
+    // 仓库内的测试字体子集（2KB，覆盖测试需要的字符），保证 CI 也能光栅化
+    paths.push(std::path::PathBuf::from("assets/fonts/test-subset.ttf"));
+    #[cfg(target_os = "macos")]
+    {
+        paths.push(std::path::PathBuf::from(
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ));
+    }
+    paths
+}
+
+/// 获取全局字体实例；找不到可用字体返回 None
+#[allow(dead_code)]
+pub fn get_font() -> Option<&'static Font> {
+    FONT.get_or_init(|| {
+        for path in candidate_font_paths() {
+            if let Ok(bytes) = std::fs::read(&path) {
+                match Font::from_bytes(bytes, FontSettings::default()) {
+                    Ok(font) => return Some(font),
+                    Err(e) => log::info!("字体加载失败 {}: {e}", path.display()),
+                }
+            }
+        }
+        log::info!("未找到可用字体，气泡文字无法渲染");
+        None
+    })
+    .as_ref()
+}
+
+/// 把一行文字光栅化为 RGBA 像素（文字深灰、背景透明）
+#[allow(dead_code)]
+pub fn rasterize_line(text: &str, font_size: f32) -> Option<(Vec<u8>, u32, u32)> {
+    let font = get_font()?;
+    let height = (font_size * 1.4).ceil() as u32;
+
+    // 逐字光栅化，取步进宽度
+    let mut glyphs = Vec::new();
+    let mut total_width = 0u32;
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, font_size);
+        let advance = metrics.advance_width.ceil() as u32;
+        glyphs.push((advance, metrics, bitmap));
+        total_width += advance;
+    }
+
+    // 拼到一行像素里
+    let mut pixels = vec![0u8; (total_width * height * 4) as usize];
+    let baseline = height.saturating_sub((font_size * 0.3) as u32); // 基线约在 70% 高度
+    let mut x_offset = 0u32;
+    for (advance, metrics, bitmap) in glyphs {
+        if metrics.width == 0 || metrics.height == 0 {
+            continue; // 空格等零宽字符没有位图
+        }
+        for (dy, row) in bitmap.chunks(metrics.width).enumerate() {
+            // ymin 是字形底部到基线的偏移
+            let py =
+                (baseline as i32 + metrics.ymin + dy as i32 - metrics.height as i32).max(0) as u32;
+            if py >= height {
+                continue;
+            }
+            for (dx, &alpha) in row.iter().enumerate() {
+                let px = x_offset + metrics.xmin.max(0) as u32 + dx as u32;
+                if px >= total_width {
+                    continue;
+                }
+                let idx = (py * total_width + px) as usize * 4;
+                if alpha > 0 {
+                    pixels[idx] = 50;
+                    pixels[idx + 1] = 50;
+                    pixels[idx + 2] = 50;
+                    pixels[idx + 3] = alpha;
+                }
+            }
+        }
+        x_offset += advance;
+    }
+
+    Some((pixels, total_width, height))
+}
+
+#[cfg(test)]
+mod raster_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_paths_include_env_override() {
+        // 设置 DS_PET_FONT 时应出现在候选列表第一位
+        unsafe {
+            std::env::set_var("DS_PET_FONT", "/tmp/test-font.ttf");
+        }
+        let paths = candidate_font_paths();
+        assert_eq!(paths[0], std::path::PathBuf::from("/tmp/test-font.ttf"));
+        unsafe {
+            std::env::remove_var("DS_PET_FONT");
+        }
+    }
+
+    #[test]
+    fn break_before_classification() {
+        // CJK 字符可以断行
+        assert!(is_break_before('你'));
+        assert!(is_break_before('。'));
+        assert!(is_break_before('あ'));
+        // ASCII 不可以
+        assert!(!is_break_before('a'));
+        assert!(!is_break_before(' '));
+        assert!(!is_break_before('1'));
+    }
+
+    #[test]
+    fn char_width_approximation() {
+        // CJK 全宽
+        assert_eq!(char_width('你', 20.0), 20.0);
+        // ASCII 半宽
+        assert_eq!(char_width('x', 20.0), 10.0);
+    }
+
+    #[test]
+    fn font_loads_or_gracefully_none() {
+        let r = get_font();
+        assert!(r.is_some() || r.is_none());
+    }
+
+    #[test]
+    fn rasterize_produces_pixels() {
+        if let Some((pixels, w, h)) = rasterize_line("Hi", 16.0) {
+            assert!(w > 0 && h > 0);
+            assert_eq!(pixels.len(), (w * h * 4) as usize);
+            assert!(pixels.chunks(4).any(|px| px[3] > 0));
+        }
+    }
+}

@@ -12,6 +12,7 @@ mod anim;
 mod assets;
 mod audio;
 mod autostart;
+mod bubble;
 mod character;
 mod config;
 mod input;
