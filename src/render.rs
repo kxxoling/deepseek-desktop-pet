@@ -300,8 +300,12 @@ impl Gpu {
             });
 
         let frame_tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("frame-320x180"),
-            size: frame_extent(),
+            label: Some("frame"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -347,6 +351,8 @@ impl Gpu {
         }
 
         PetSurface {
+            tex_w: width,
+            tex_h: height,
             surface,
             config,
             pipeline,
@@ -393,8 +399,12 @@ impl Gpu {
                 cache: None,
             });
         let frame_tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("frame-320x180"),
-            size: frame_extent(),
+            label: Some("frame"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -418,6 +428,8 @@ impl Gpu {
             ],
         });
         PetSurface {
+            tex_w: width,
+            tex_h: height,
             pipeline,
             bind_group,
             frame_tex,
@@ -444,6 +456,11 @@ pub enum SurfaceLost {
 
 /// 每窗渲染面
 pub struct PetSurface {
+    /// 纹理宽高（上传时用，宠物窗 320×180、气泡窗自定义）
+    #[allow(dead_code)]
+    tex_w: u32,
+    #[allow(dead_code)]
+    tex_h: u32,
     #[cfg(not(target_os = "windows"))]
     surface: wgpu::Surface<'static>,
     #[cfg(not(target_os = "windows"))]

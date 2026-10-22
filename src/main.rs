@@ -13,6 +13,7 @@ mod assets;
 mod audio;
 mod autostart;
 mod bubble;
+mod bubble_window;
 mod character;
 mod config;
 mod input;
@@ -74,6 +75,8 @@ struct App {
     pets_hidden: bool,
     /// 全屏自动隐藏的上次检测时刻（2 秒轮询一次）
     fullscreen_check_at: Instant,
+    /// 当前显示的气泡窗口（一次最多一个，新的替换旧的）
+    bubble: Option<crate::bubble_window::BubbleWindow>,
     gpu: Arc<render::Gpu>,
     proxy: EventLoopProxy<UserEvent>,
     pets: Vec<PetWindow>,
@@ -866,6 +869,14 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     pet.trigger_clip(&clip);
                 }
+                // 在宠物上方显示气泡
+                if let Some(pet) = self.pets.iter().find(|p| p.id() == pet_id)
+                    && let Some((pos, size)) = pet.window_position_and_size()
+                {
+                    self.bubble = Some(crate::bubble_window::BubbleWindow::new(
+                        event_loop, &self.gpu, pos, size, &line,
+                    ));
+                }
             }
             UserEvent::ExitApp => {
                 self.save_positions();
@@ -885,6 +896,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.remove_pet(window_id);
             }
             WindowEvent::RedrawRequested => {
+                if let Some(bubble) = self.bubble.as_mut()
+                    && bubble.window_id() == window_id
+                {
+                    bubble.draw();
+                    return;
+                }
                 if let Some(pet) = self.pets.iter_mut().find(|p| p.id() == window_id) {
                     pet.render();
                 }
@@ -928,6 +945,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // 点托盘图标把全部桌宠显示或隐藏；要新增宠物只能通过右键菜单
                 self.toggle_pets_visible();
             }
+        }
+
+        // 气泡到时自动关闭（drop 掉 BubbleWindow 随即关窗）
+        if self
+            .bubble
+            .as_ref()
+            .is_some_and(crate::bubble_window::BubbleWindow::expired)
+        {
+            self.bubble = None;
         }
 
         // 每 2 秒检测一次全屏，有应用全屏时自动隐藏，退出全屏后恢复
@@ -1144,6 +1170,7 @@ fn main() {
         current_character: current,
         pets_hidden: false,
         fullscreen_check_at: Instant::now(),
+        bubble: None,
         gpu,
         proxy,
         pets: Vec::new(),
