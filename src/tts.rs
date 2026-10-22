@@ -32,7 +32,6 @@ pub fn init() {
 }
 
 /// 请求朗读一段文字；未初始化或队列满时静默丢弃
-#[allow(dead_code)]
 pub fn speak(text: &str) {
     let Some(guard) = SENDER.get() else {
         return;
@@ -99,7 +98,6 @@ fn synth_and_play(text: &str) -> Result<(), String> {
 }
 
 /// 确保临时文件在退出时尽力清理（进程正常退出路径）
-#[allow(dead_code)]
 pub fn cleanup() {
     let _ = std::fs::remove_file(out_path());
 }
