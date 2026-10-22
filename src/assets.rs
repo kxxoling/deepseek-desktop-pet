@@ -58,6 +58,11 @@ mod tests {
 
     #[test]
     fn load_click_sound_file_reads_wav() {
+        // locate_assets_root 读进程环境变量与工作目录，只读用例同样要与改环境的用例串行，
+        // 否则并行时相对路径可能被解析进别的用例的临时目录
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // 直接调加载函数，绕过全局缓存
         let data = load_click_sound_file().expect("音效文件应可读取");
         assert!(data.len() > 44);
@@ -66,6 +71,10 @@ mod tests {
 
     #[test]
     fn click_sound_file_exists_and_is_wav() {
+        // 相对路径随进程工作目录解析，同样须串行
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // 直接读文件，不经过全局缓存（OnceLock 可能被其他测试先初始化为 None）
         let data = std::fs::read("assets/sounds/default/click.wav")
             .expect("内置音效文件应存在于 assets/sounds/default/");
