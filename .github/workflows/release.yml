@@ -106,6 +106,8 @@ jobs:
       - name: Extract frame assets
         shell: bash
         run: tar -xf assets.tar
+      - name: Fetch CJK font
+        uses: ./.github/actions/fetch-cjk-font
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 

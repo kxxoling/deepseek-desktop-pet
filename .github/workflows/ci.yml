@@ -120,6 +120,8 @@ jobs:
       - name: Install Linux window system dependencies
         if: runner.os == 'Linux'
         uses: ./.github/actions/install-linux-deps
+      - name: Fetch CJK font
+        uses: ./.github/actions/fetch-cjk-font
       - name: Unit tests
         run: cargo test --target ${{ matrix.target }}
 
@@ -139,6 +141,8 @@ jobs:
           tool: cargo-llvm-cov
       - name: Install Linux window system dependencies
         uses: ./.github/actions/install-linux-deps
+      - name: Fetch CJK font
+        uses: ./.github/actions/fetch-cjk-font
       # Logic layer (library/anim/logging/assets/tray) line coverage gate;
       # GUI/platform/bootstrap files (window/platform/render/main) require a real
       # window and GPU and are excluded from the statistics
@@ -181,6 +185,8 @@ jobs:
       - name: Extract frame assets
         shell: bash
         run: tar -xf assets.tar
+      - name: Fetch CJK font
+        uses: ./.github/actions/fetch-cjk-font
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}
       # 完整分发包（含资产；macOS 为 .app zip，ad-hoc 签名）

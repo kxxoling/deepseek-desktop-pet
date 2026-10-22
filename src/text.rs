@@ -201,8 +201,9 @@ fn candidate_font_paths() -> Vec<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("DS_PET_FONT") {
         paths.push(std::path::PathBuf::from(p));
     }
-    // 仓库内的测试字体子集（2KB，覆盖测试需要的字符），保证 CI 也能光栅化
-    paths.push(std::path::PathBuf::from("assets/fonts/test-subset.ttf"));
+    // 随包的思源黑体子集（GB2312 一级 3755 个常用字 + ASCII + 常用标点，约 1MB），三平台显示一致，没有中文系统字体的机器也能渲染
+    // 路径按资产根目录解析，与点击音效的定位方式一致
+    paths.push(crate::assets::locate_assets_root().join("fonts/cjk-subset.ttf"));
     #[cfg(target_os = "macos")]
     {
         paths.push(std::path::PathBuf::from(
@@ -322,6 +323,20 @@ mod raster_tests {
     fn font_loads_or_gracefully_none() {
         let r = get_font();
         assert!(r.is_some() || r.is_none());
+    }
+
+    #[test]
+    fn bundled_subset_covers_common_chars() {
+        // 直接加载随包字体（绕开全局缓存），常用汉字、标点和 ASCII 都要有真实字形
+        // 缺字时 fontdue 画的是 .notdef 方框，位图同样非空，因此要查字形索引而不能只看位图
+        let bytes = std::fs::read("assets/fonts/cjk-subset.ttf")
+            .expect("随包字体应存在；缺失时先运行 scripts/fetch_font.sh");
+        let font = Font::from_bytes(bytes, FontSettings::default()).expect("随包字体应可解析");
+        for ch in "你好世界，宠物在说话。Hello!".chars() {
+            assert_ne!(font.lookup_glyph_index(ch), 0, "缺字形：{ch}");
+            let (_, bitmap) = font.rasterize(ch, 16.0);
+            assert!(bitmap.iter().any(|&a| a > 0), "字形不应为空：{ch}");
+        }
     }
 
     #[test]

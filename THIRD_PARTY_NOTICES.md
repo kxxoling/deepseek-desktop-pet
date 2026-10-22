@@ -27,6 +27,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## 思源黑体（Source Han Sans）
+
+分发包中的 `assets/fonts/cjk-subset.ttf` 由 `scripts/fetch_font.sh` 在构建期生成，内容是 [Source Han Sans](https://github.com/adobe-fonts/source-han-sans)（思源黑体，Adobe）Regular 字重的子集，取 GB2312 一级汉字、ASCII 与常用标点；TrueType 版本来自 [Source-Han-TrueType](https://github.com/Pal3love/Source-Han-TrueType) 的转换。许可证全文见 `assets/fonts/OFL.txt`。
+
+SIL Open Font License 1.1
+
 ## Rust 依赖
 
 传递依赖的许可以 `Cargo.lock` 中各 crate 自带的许可证声明为准；

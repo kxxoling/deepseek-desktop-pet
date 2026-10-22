@@ -6,3 +6,4 @@ ds-pet.app/
 ds-pet-*.zip
 ds-pet-*.tar.gz
 package/
+/assets/fonts/*.ttf
