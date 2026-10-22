@@ -39,9 +39,7 @@ jobs:
           key: ${{ matrix.target }}
       - name: Install Linux window system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Format check
         if: runner.os == 'macOS' # platform-independent, run once
         run: cargo fmt --all --check
@@ -121,9 +119,7 @@ jobs:
           key: ${{ matrix.target }}
       - name: Install Linux window system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Unit tests
         run: cargo test --target ${{ matrix.target }}
 
@@ -142,9 +138,7 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - name: Install Linux window system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
+        uses: ./.github/actions/install-linux-deps
       # Logic layer (library/anim/logging/assets/tray) line coverage gate;
       # GUI/platform/bootstrap files (window/platform/render/main) require a real
       # window and GPU and are excluded from the statistics
@@ -179,9 +173,7 @@ jobs:
           key: ${{ matrix.target }}
       - name: Install Linux window system dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Download frame assets
         uses: actions/download-artifact@v8
         with:
