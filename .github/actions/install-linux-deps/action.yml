@@ -22,8 +22,14 @@ runs:
         cache_dir="$HOME/apt-archives"
         mkdir -p "$cache_dir"
         # Point apt's download cache at the cached dir, so restored debs are
-        # reused and fresh downloads land there for the next run.
-        common_opts=(install -y --no-install-recommends -o "Dir::Cache::archives=$cache_dir")
+        # reused and fresh downloads land there for the next run. The dir lives
+        # under $HOME, which the _apt sandbox user cannot write to, so downloads
+        # run as root explicitly (apt would fall back to root with a warning).
+        common_opts=(
+          install -y --no-install-recommends
+          -o "Dir::Cache::archives=$cache_dir"
+          -o APT::Sandbox::User=root
+        )
         if ! sudo apt-get "${common_opts[@]}" "${pkgs[@]}"; then
           echo "::warning::apt install without update failed, falling back to apt-get update"
           sudo apt-get update
