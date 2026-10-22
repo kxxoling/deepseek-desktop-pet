@@ -1,0 +1,15 @@
+name: Fetch CJK font subset
+description: >-
+  获取气泡文字用的思源黑体子集 assets/fonts/cjk-subset.ttf：
+  由 scripts/fetch_font.sh 下载并生成，产物按脚本哈希缓存，命中时直接复用。
+runs:
+  using: composite
+  steps:
+    - name: Cache font subset
+      uses: actions/cache@v6
+      with:
+        path: assets/fonts/cjk-subset.ttf
+        key: cjk-subset-${{ hashFiles('scripts/fetch_font.sh') }}
+    - name: Fetch and subset (no-op when cached)
+      shell: bash
+      run: scripts/fetch_font.sh
