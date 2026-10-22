@@ -22,6 +22,7 @@ mod physics;
 mod platform;
 mod positions;
 mod render;
+mod selftalk;
 mod text;
 mod tray;
 mod tts;
@@ -48,6 +49,12 @@ pub enum UserEvent {
     TriggerClip(String),
     /// 对右键菜单目标宠物触发黄金回旋
     SpinPet,
+    /// 宠物说了一句话；有对应动画的同时播放
+    SelfTalk {
+        pet_id: WindowId,
+        line: String,
+        clip_name: Option<String>,
+    },
     ExitApp,
 }
 
@@ -846,6 +853,18 @@ impl ApplicationHandler<UserEvent> for App {
                     && let Some(pet) = self.pets.iter_mut().find(|p| p.id() == target)
                 {
                     pet.start_spin();
+                }
+            }
+            UserEvent::SelfTalk {
+                pet_id,
+                line,
+                clip_name,
+            } => {
+                log::info!("自言自语：{line}");
+                if let Some(clip) = clip_name
+                    && let Some(pet) = self.pets.iter_mut().find(|p| p.id() == pet_id)
+                {
+                    pet.trigger_clip(&clip);
                 }
             }
             UserEvent::ExitApp => {

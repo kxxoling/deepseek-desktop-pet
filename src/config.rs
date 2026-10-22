@@ -198,6 +198,16 @@ pub fn get_f64(key: &str) -> Option<f64> {
     with_global(|c| c.get(key).and_then(Value::as_f64))
 }
 
+pub fn get_str_array(key: &str) -> Option<Vec<String>> {
+    with_global(|c| {
+        c.get(key).and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+    })
+}
+
 pub fn get_str(key: &str) -> Option<String> {
     with_global(|c| c.get(key).and_then(Value::as_str).map(str::to_string))
 }
