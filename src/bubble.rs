@@ -1,17 +1,13 @@
 //! 气泡：在宠物上方显示一条文字消息，超时自动关闭。
-//! 纯逻辑（队列、分页、定位、光栅化）在本文件；窗口创建与渲染接线在 window.rs。
+//! 纯逻辑（队列、分页、定位、光栅化）在本文件；窗口创建与渲染接线在 `bubble_window.rs`。
 
 /// 气泡显示时长（秒）
-#[allow(dead_code)]
 pub const BUBBLE_DURATION_SECS: f64 = 5.0;
 /// 气泡最大宽度（逻辑点）
-#[allow(dead_code)]
 pub const BUBBLE_MAX_WIDTH: f64 = 280.0;
 /// 气泡内边距（逻辑点）
-#[allow(dead_code)]
 pub const BUBBLE_PADDING: f64 = 12.0;
 /// 每页最多显示的行数（超出分页）
-#[allow(dead_code)]
 pub const BUBBLE_LINES_PER_PAGE: usize = 5;
 
 /// 消息优先级：高的先显示
@@ -25,32 +21,29 @@ pub enum Priority {
 
 /// 一条气泡消息的内容
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct BubbleContent {
     pub text: String,
     /// 显示秒数，0 用默认值
-    #[allow(dead_code)]
     pub duration_secs: f64,
     pub priority: Priority,
 }
 
-/// 队列里的一条消息（带序号，同优先级按 FIFO）
+/// 队列里的一条（带序号，同优先级按 FIFO）
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct Queued {
-    content: BubbleContent,
+struct Queued<T> {
+    item: T,
+    priority: Priority,
     seq: u64,
 }
 
-/// 气泡队列：一次显示一条，优先级高的排前面，同优先级按 FIFO
-#[allow(dead_code)]
-pub struct BubbleQueue {
-    pending: Vec<Queued>,
+/// 气泡队列：一次显示一条，优先级高的排前面，同优先级按 FIFO。
+/// 队列项是泛型，调用方可以附带自己的上下文（如来源宠物的窗口 id）
+pub struct BubbleQueue<T> {
+    pending: Vec<Queued<T>>,
     next_seq: u64,
 }
 
-#[allow(dead_code)]
-impl BubbleQueue {
+impl<T> BubbleQueue<T> {
     pub fn new() -> Self {
         Self {
             pending: Vec::new(),
@@ -58,41 +51,48 @@ impl BubbleQueue {
         }
     }
 
-    /// 入队一条消息
-    pub fn push(&mut self, content: BubbleContent) {
+    /// 入队一条；优先级显式传入，队列按它排序
+    pub fn push(&mut self, priority: Priority, item: T) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.pending.push(Queued { content, seq });
-        // 按优先级降序 + 序号升序排列：高优先级在前，同级 FIFO
-        self.pending.sort_by(|a, b| {
-            b.content
-                .priority
-                .cmp(&a.content.priority)
-                .then(a.seq.cmp(&b.seq))
+        self.pending.push(Queued {
+            item,
+            priority,
+            seq,
         });
+        // 按优先级降序 + 序号升序排列：高优先级在前，同级 FIFO
+        self.pending
+            .sort_by(|a, b| b.priority.cmp(&a.priority).then(a.seq.cmp(&b.seq)));
     }
 
-    /// 取出下一条要显示的消息；队列空返回 None
-    pub fn pop(&mut self) -> Option<BubbleContent> {
+    /// 取出下一条要显示的；队列空返回 None
+    pub fn pop(&mut self) -> Option<T> {
         if self.pending.is_empty() {
             None
         } else {
-            Some(self.pending.remove(0).content)
+            Some(self.pending.remove(0).item)
         }
     }
 
     /// 队列长度
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.pending.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
 }
 
+impl<T> Default for BubbleQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 把换行后的行数组按每页容量分页；末页只有孤行时从前一页匀一行过来
-#[allow(dead_code)]
 pub fn paginate(lines: &[crate::text::LineSpan]) -> Vec<Vec<crate::text::LineSpan>> {
     if lines.is_empty() {
         return Vec::new();
@@ -116,7 +116,6 @@ pub fn paginate(lines: &[crate::text::LineSpan]) -> Vec<Vec<crate::text::LineSpa
 }
 
 /// 计算气泡窗口的位置：默认在宠物上方水平居中，上方空间不够翻到下方
-#[allow(dead_code)]
 pub fn bubble_position(
     pet_pos: (f64, f64),
     pet_size: (f64, f64),
@@ -133,7 +132,6 @@ pub fn bubble_position(
 }
 
 /// 计算气泡窗口的尺寸：根据行数和字号
-#[allow(dead_code)]
 pub fn bubble_size(line_count: usize, font_size: f64) -> (f64, f64) {
     let line_height = font_size * 1.3;
     (
@@ -204,12 +202,17 @@ mod tests {
         }
     }
 
+    fn enqueue(q: &mut BubbleQueue<BubbleContent>, text: &str, priority: Priority) {
+        let content = msg(text, priority);
+        q.push(content.priority, content);
+    }
+
     #[test]
     fn queue_fifo_within_same_priority() {
-        let mut q = BubbleQueue::new();
-        q.push(msg("first", Priority::Normal));
-        q.push(msg("second", Priority::Normal));
-        q.push(msg("third", Priority::Normal));
+        let mut q: BubbleQueue<BubbleContent> = BubbleQueue::new();
+        enqueue(&mut q, "first", Priority::Normal);
+        enqueue(&mut q, "second", Priority::Normal);
+        enqueue(&mut q, "third", Priority::Normal);
         assert_eq!(q.pop().unwrap().text, "first");
         assert_eq!(q.pop().unwrap().text, "second");
         assert_eq!(q.pop().unwrap().text, "third");
@@ -218,10 +221,10 @@ mod tests {
 
     #[test]
     fn high_priority_jumps_queue() {
-        let mut q = BubbleQueue::new();
-        q.push(msg("low", Priority::Low));
-        q.push(msg("normal", Priority::Normal));
-        q.push(msg("urgent", Priority::High));
+        let mut q: BubbleQueue<BubbleContent> = BubbleQueue::new();
+        enqueue(&mut q, "low", Priority::Low);
+        enqueue(&mut q, "normal", Priority::Normal);
+        enqueue(&mut q, "urgent", Priority::High);
         assert_eq!(q.pop().unwrap().text, "urgent");
         assert_eq!(q.pop().unwrap().text, "normal");
         assert_eq!(q.pop().unwrap().text, "low");
@@ -229,9 +232,9 @@ mod tests {
 
     #[test]
     fn queue_length_and_empty() {
-        let mut q = BubbleQueue::new();
+        let mut q: BubbleQueue<BubbleContent> = BubbleQueue::new();
         assert!(q.is_empty());
-        q.push(msg("a", Priority::Normal));
+        enqueue(&mut q, "a", Priority::Normal);
         assert_eq!(q.len(), 1);
         q.pop();
         assert!(q.is_empty());
