@@ -1024,6 +1024,12 @@ impl PetWindow {
         self.window.id()
     }
 
+    /// 窗口的全局位置和尺寸
+    pub fn window_position_and_size(&self) -> Option<((f64, f64), (f64, f64))> {
+        let pos = self.window_pos_logical()?;
+        Some((pos, (WIN_W, WIN_H)))
+    }
+
     /// 位置存档的快照：显示器指纹加显示器内逻辑坐标
     pub fn position_snapshot(&self) -> Option<crate::positions::PetPos> {
         let m = self.window.current_monitor()?;

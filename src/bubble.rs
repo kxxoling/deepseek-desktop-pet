@@ -1,5 +1,5 @@
 //! 气泡：在宠物上方显示一条文字消息，超时自动关闭。
-//! 纯逻辑（队列、分页、定位）在本文件；窗口创建与渲染接线在 main.rs。
+//! 纯逻辑（队列、分页、定位、光栅化）在本文件；窗口创建与渲染接线在 window.rs。
 
 /// 气泡显示时长（秒）
 #[allow(dead_code)]
@@ -142,6 +142,56 @@ pub fn bubble_size(line_count: usize, font_size: f64) -> (f64, f64) {
     )
 }
 
+/// 生成气泡的完整像素缓冲：背景半透明白色，文字深灰色
+pub fn render_bubble_pixels(
+    text: &str,
+    lines: &[crate::text::LineSpan],
+    font_size: f64,
+) -> Vec<u8> {
+    let line_height = (font_size as f32 * 1.3).ceil() as u32;
+    let width = BUBBLE_MAX_WIDTH as u32;
+    let height = (lines.len() as f64 * font_size * 1.3 + BUBBLE_PADDING * 2.0) as u32;
+
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    // 背景半透明白色
+    for px in pixels.chunks_mut(4) {
+        px[0] = 255;
+        px[1] = 255;
+        px[2] = 255;
+        px[3] = 220;
+    }
+    // 把每一行的文字画上去
+    for (i, line) in lines.iter().enumerate() {
+        let line_text = &text[line.start..line.end];
+        if let Some((glyphs, gw, gh)) = crate::text::rasterize_line(line_text, font_size as f32) {
+            let y_base = BUBBLE_PADDING as usize + i * line_height as usize;
+            let x_base = BUBBLE_PADDING as usize;
+            for gy in 0..gh as usize {
+                let py = y_base + gy;
+                if py >= height as usize {
+                    continue;
+                }
+                for gx in 0..gw as usize {
+                    let px = x_base + gx;
+                    if px >= width as usize {
+                        continue;
+                    }
+                    let src = (gy * gw as usize + gx) * 4;
+                    let alpha = glyphs[src + 3];
+                    if alpha > 0 {
+                        let dst = (py * width as usize + px) * 4;
+                        pixels[dst] = glyphs[src];
+                        pixels[dst + 1] = glyphs[src + 1];
+                        pixels[dst + 2] = glyphs[src + 2];
+                        pixels[dst + 3] = alpha;
+                    }
+                }
+            }
+        }
+    }
+    pixels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,4 +312,24 @@ mod tests {
         assert_eq!(w, BUBBLE_MAX_WIDTH);
         assert!((h - (16.0 * 1.3 + 24.0)).abs() < 0.01);
     }
+}
+#[test]
+fn render_bubble_pixels_has_background_and_correct_size() {
+    let text = "你好";
+    let lines = crate::text::wrap_default(text, 200.0);
+    let pixels = render_bubble_pixels(text, &lines, 16.0);
+    let height = (lines.len() as f64 * 16.0 * 1.3 + BUBBLE_PADDING * 2.0) as usize;
+    assert_eq!(pixels.len(), BUBBLE_MAX_WIDTH as usize * height * 4);
+    // 左上角背景像素是半透明白色
+    assert_eq!(&pixels[0..4], &[255, 255, 255, 220]);
+}
+
+#[test]
+fn render_bubble_pixels_contains_text_pixels() {
+    let text = "Hi";
+    let lines = crate::text::wrap_default(text, 200.0);
+    let pixels = render_bubble_pixels(text, &lines, 16.0);
+    // 至少有一个非背景像素（文字笔画）
+    let has_text = pixels.chunks(4).any(|px| px[3] != 220 || px[0] < 255);
+    assert!(has_text, "像素里应该有文字，不全是背景色");
 }
