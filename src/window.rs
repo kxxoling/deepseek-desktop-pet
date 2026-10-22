@@ -1002,13 +1002,20 @@ impl PetWindow {
         }
     }
 
-    /// 点击时播放音效（config `click_sound_enabled` 控制，默认开）
+    /// 点击时播放音效：开关 `click_sound_enabled`、音量 `click_sound_volume`（0–100）、音效包 `click_sound_pack`
     fn play_click_sound() {
         if !crate::config::get_bool("click_sound_enabled").unwrap_or(true) {
             return;
         }
-        if let Some(data) = crate::assets::click_sound() {
-            crate::audio::play(data);
+        let volume = crate::audio::volume_from_percent(
+            crate::config::get_f64("click_sound_volume").unwrap_or(70.0),
+        );
+        let pack = crate::config::get("click_sound_pack")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "default".into());
+        let roll = crate::anim::rand_range(0.0, 1.0);
+        if let Some(data) = crate::assets::click_sound_for(&pack, roll) {
+            crate::audio::play(&data, volume);
         }
     }
 
