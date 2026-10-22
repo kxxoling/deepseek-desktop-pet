@@ -79,6 +79,10 @@ pub struct PetWindow {
     spin: Option<(f64, f64)>,
     /// 弹弓蓄力：拖拽中按住右键开始，记录按下位置（窗口内逻辑坐标）
     sling_anchor: Option<(f64, f64)>,
+    /// 下次自言自语的时刻（只对待机状态生效）
+    next_selftalk_at: Instant,
+    /// 上一次自言自语的台词（避免连续重复）
+    last_selftalk: Option<String>,
     /// 被撞飞期间的 body 倾角（度），速度低时回到零
     knock_tilt: f64,
     /// 被撞飞的宠物落稳的时刻；到时重新判断是否回到探头姿态
@@ -101,7 +105,18 @@ pub struct PetWindow {
     throw_mult: f64,
 }
 
+fn now_selftalk_at() -> Instant {
+    let min =
+        crate::config::get_f64("self_talk_min_secs").unwrap_or(crate::selftalk::SELF_TALK_MIN_SECS);
+    let max =
+        crate::config::get_f64("self_talk_max_secs").unwrap_or(crate::selftalk::SELF_TALK_MAX_SECS);
+    let roll = crate::anim::rand_range(0.0, 1.0);
+    Instant::now()
+        + std::time::Duration::from_secs_f64(crate::selftalk::next_interval_secs(min, max, roll))
+}
+
 impl PetWindow {
+    #[allow(clippy::too_many_lines)]
     #[allow(clippy::too_many_lines)]
     pub fn new(
         event_loop: &ActiveEventLoop,
@@ -207,6 +222,8 @@ impl PetWindow {
             probe: None,
             spin: None,
             sling_anchor: None,
+            next_selftalk_at: now_selftalk_at(),
+            last_selftalk: None,
             knock_tilt: 0.0,
             knock_landed_at: None,
             rotate_scratch: vec![0u8; FRAME_BYTES],
@@ -677,6 +694,10 @@ impl PetWindow {
             self.fire_random_event();
         }
 
+        if matches!(self.anim.mode, Mode::Idle) && now >= self.next_selftalk_at {
+            self.self_talk();
+        }
+
         let advanced = match self.anim.tick(now) {
             Tick::Idle => false,
             Tick::Advanced => true,
@@ -726,6 +747,23 @@ impl PetWindow {
         }
 
         self.hit_poll();
+    }
+
+    /// 自言自语：随机说一句话；有对应动画的同时播放；然后安排下一次什么时候说
+    fn self_talk(&mut self) {
+        let lines = crate::selftalk::lines_from_config();
+        let roll = crate::anim::rand_range(0.0, 1.0);
+        let line = crate::selftalk::pick_line(&lines, self.last_selftalk.as_deref(), roll);
+        if !line.is_empty() {
+            self.last_selftalk = Some(line.clone());
+            let clip = crate::selftalk::matching_text_clip(&line);
+            let _ = self.proxy.send_event(crate::UserEvent::SelfTalk {
+                pet_id: self.id(),
+                line,
+                clip_name: clip.map(str::to_string),
+            });
+        }
+        self.next_selftalk_at = now_selftalk_at();
     }
 
     // ---------- 交互事件 ----------
