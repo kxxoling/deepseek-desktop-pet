@@ -56,6 +56,11 @@ pub enum UserEvent {
         line: String,
         clip_name: Option<String>,
     },
+    /// 宠物展示一张配图
+    SelfTalkImage {
+        pet_id: WindowId,
+        png: Vec<u8>,
+    },
     ExitApp,
 }
 
@@ -878,7 +883,18 @@ impl ApplicationHandler<UserEvent> for App {
                 self.show_bubble(
                     pet_id,
                     crate::bubble::BubbleContent {
-                        text: line.clone(),
+                        media: crate::bubble::BubbleMedia::Text(line.clone()),
+                        duration_secs: 0.0,
+                        priority: crate::bubble::Priority::Normal,
+                    },
+                );
+            }
+            UserEvent::SelfTalkImage { pet_id, png } => {
+                log::info!("自言自语：展示一张配图");
+                self.show_bubble(
+                    pet_id,
+                    crate::bubble::BubbleContent {
+                        media: crate::bubble::BubbleMedia::Image(png),
                         duration_secs: 0.0,
                         priority: crate::bubble::Priority::Normal,
                     },
@@ -986,15 +1002,33 @@ impl ApplicationHandler<UserEvent> for App {
                 .find(|p| p.id() == pet_id)
                 .and_then(window::PetWindow::window_position_and_size)
         {
-            self.bubble = Some(crate::bubble_window::BubbleWindow::new(
-                event_loop,
-                &self.gpu,
-                pet_id,
-                pos,
-                size,
-                &content.text,
-                content.duration_secs,
-            ));
+            let window = match &content.media {
+                crate::bubble::BubbleMedia::Text(text) => {
+                    Some(crate::bubble_window::BubbleWindow::new_text(
+                        event_loop,
+                        &self.gpu,
+                        pet_id,
+                        pos,
+                        size,
+                        text,
+                        content.duration_secs,
+                    ))
+                }
+                crate::bubble::BubbleMedia::Image(png) => {
+                    crate::bubble_window::BubbleWindow::new_image(
+                        event_loop,
+                        &self.gpu,
+                        pet_id,
+                        pos,
+                        size,
+                        png,
+                        content.duration_secs,
+                    )
+                }
+            };
+            if let Some(window) = window {
+                self.bubble = Some(window);
+            }
         }
 
         // 气泡跟随所属宠物移动

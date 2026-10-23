@@ -48,13 +48,19 @@ fn custom_click_sound(roll: f64) -> Option<Vec<u8>> {
     std::fs::read(root.join("custom").join(pick)).ok()
 }
 
-/// 按 roll ∈ [0,1] 从非空列表挑一个；空列表返回 None
-pub(crate) fn pick_by_roll(names: &[String], roll: f64) -> Option<String> {
-    if names.is_empty() {
+/// 把 roll ∈ [0,1] 映射成列表下标，roll 取到 1 时落在最后一个元素上；空列表返回 None
+pub(crate) fn roll_index(len: usize, roll: f64) -> Option<usize> {
+    if len == 0 {
         return None;
     }
-    let idx = (roll.clamp(0.0, 1.0) * names.len() as f64) as usize;
-    Some(names[idx.min(names.len() - 1)].clone())
+    let idx = (roll.clamp(0.0, 1.0) * len as f64) as usize;
+    Some(idx.min(len - 1))
+}
+
+/// 按 roll ∈ [0,1] 从非空列表挑一个；空列表返回 None
+pub(crate) fn pick_by_roll(names: &[String], roll: f64) -> Option<String> {
+    let idx = roll_index(names.len(), roll)?;
+    Some(names[idx].clone())
 }
 
 pub fn locate_assets_root() -> PathBuf {
@@ -233,7 +239,7 @@ mod tests {
             pick_by_roll(&names, 1.0 / names.len() as f64).as_deref(),
             Some("b")
         );
-        // roll 上界钳到最后一个
+        // roll 取到 1 时落在最后一个
         assert_eq!(pick_by_roll(&names, 1.0).as_deref(), Some("c"));
         assert_eq!(pick_by_roll(&[], 0.5), None);
     }

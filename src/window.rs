@@ -749,35 +749,30 @@ impl PetWindow {
         self.hit_poll();
     }
 
-    /// 自言自语：随机说一句话；有对应动画的同时播放；然后安排下一次什么时候说
+    /// 自言自语：说一句话或展示一张配图，然后安排下一次什么时候说
     fn self_talk(&mut self) {
-        let lines = crate::selftalk::lines_from_config();
-        let roll = crate::anim::rand_range(0.0, 1.0);
-        let line = crate::selftalk::pick_line(&lines, self.last_selftalk.as_deref(), roll);
-        if !line.is_empty() {
-            self.last_selftalk = Some(line.clone());
-            let clip = crate::selftalk::matching_text_clip(&line);
-            let _ = self.proxy.send_event(crate::UserEvent::SelfTalk {
-                pet_id: self.id(),
-                line,
-                clip_name: clip.map(str::to_string),
-            });
-        }
+        self.utter_selftalk();
         self.next_selftalk_at = now_selftalk_at();
     }
 
-    /// 单击回应时有概率说一句话，台词与动画走待机自言自语的同一条链路；
-    /// config `self_talk_on_click` 开关（默认开）、`self_talk_on_click_chance` 概率（默认 0.25）
-    fn maybe_talk_on_click(&mut self) {
-        let enabled = crate::config::get_bool("self_talk_on_click").unwrap_or(true);
-        let chance = crate::config::get_f64("self_talk_on_click_chance").unwrap_or(0.25);
+    /// 说出一次自言自语的内容：先掷骰决定出图还是出文字（config `self_talk_image_chance`，
+    /// 配图目录没有图时永远出文字），再进对应的池子挑内容。概率判定和挑内容用两个独立的
+    /// 随机值，共用一个的话，命中的取值总落在概率区间内，挑出来的内容就总在列表前段
+    fn utter_selftalk(&mut self) {
+        let images = crate::selftalk::image_files_from_config();
+        let chance = crate::config::get_f64("self_talk_image_chance").unwrap_or(0.2);
         let roll = crate::anim::rand_range(0.0, 1.0);
-        if !crate::selftalk::should_talk_on_click(enabled, chance, roll) {
-            return;
+        if crate::selftalk::should_show_image(!images.is_empty(), chance, roll) {
+            let pick_roll = crate::anim::rand_range(0.0, 1.0);
+            if let Some(png) = crate::selftalk::read_image(&images, pick_roll) {
+                let _ = self.proxy.send_event(crate::UserEvent::SelfTalkImage {
+                    pet_id: self.id(),
+                    png,
+                });
+                return;
+            }
         }
         let lines = crate::selftalk::lines_from_config();
-        // 挑台词另掷一个随机值：和概率判定共用一个的话，命中时取值总在概率区间内，
-        // 台词就总在列表前段打转
         let pick_roll = crate::anim::rand_range(0.0, 1.0);
         let line = crate::selftalk::pick_line(&lines, self.last_selftalk.as_deref(), pick_roll);
         if line.is_empty() {
@@ -790,6 +785,17 @@ impl PetWindow {
             line,
             clip_name: clip.map(str::to_string),
         });
+    }
+
+    /// 单击回应时有概率说一句话；config `self_talk_on_click` 开关（默认开）、
+    /// `self_talk_on_click_chance` 概率（默认 0.25）
+    fn maybe_talk_on_click(&mut self) {
+        let enabled = crate::config::get_bool("self_talk_on_click").unwrap_or(true);
+        let chance = crate::config::get_f64("self_talk_on_click_chance").unwrap_or(0.25);
+        let roll = crate::anim::rand_range(0.0, 1.0);
+        if crate::selftalk::should_talk_on_click(enabled, chance, roll) {
+            self.utter_selftalk();
+        }
     }
 
     // ---------- 交互事件 ----------

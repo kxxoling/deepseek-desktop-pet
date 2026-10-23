@@ -9,6 +9,11 @@ pub const BUBBLE_MAX_WIDTH: f64 = 280.0;
 pub const BUBBLE_PADDING: f64 = 12.0;
 /// 每页最多显示的行数（超出分页）
 pub const BUBBLE_LINES_PER_PAGE: usize = 5;
+/// 配图较长边的基础显示尺寸（逻辑像素），config `bubble_image_scale` 以它为基准缩放
+pub const BUBBLE_IMAGE_BASE: f64 = 160.0;
+/// 配图缩放系数的取值范围
+pub const BUBBLE_IMAGE_SCALE_MIN: f64 = 0.5;
+pub const BUBBLE_IMAGE_SCALE_MAX: f64 = 3.0;
 
 /// 消息优先级：高的先显示
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -22,10 +27,17 @@ pub enum Priority {
 /// 一条气泡消息的内容
 #[derive(Debug, Clone)]
 pub struct BubbleContent {
-    pub text: String,
+    pub media: BubbleMedia,
     /// 显示秒数，0 用默认值
     pub duration_secs: f64,
     pub priority: Priority,
+}
+
+/// 气泡显示的内容：一句话，或一张 png 图片的字节
+#[derive(Debug, Clone)]
+pub enum BubbleMedia {
+    Text(String),
+    Image(Vec<u8>),
 }
 
 /// 队列里的一条（带序号，同优先级按 FIFO）
@@ -190,13 +202,108 @@ pub fn render_bubble_pixels(
     pixels
 }
 
+// ---------- 配图 ----------
+
+/// 图片的显示尺寸：较长边缩到基准尺寸再乘配置系数（系数超出 0.5–3.0 时按边界值），宽高比保持不变
+pub fn fit_image_size(w: u32, h: u32, scale: f64) -> (u32, u32) {
+    let scale = scale.clamp(BUBBLE_IMAGE_SCALE_MIN, BUBBLE_IMAGE_SCALE_MAX);
+    let (w, h) = (f64::from(w.max(1)), f64::from(h.max(1)));
+    let ratio = BUBBLE_IMAGE_BASE / w.max(h);
+    let tw = (w * ratio * scale).round().max(1.0) as u32;
+    let th = (h * ratio * scale).round().max(1.0) as u32;
+    (tw, th)
+}
+
+/// 双线性插值把 RGBA 源图缩放到目标尺寸，四个通道同步插值
+fn scale_bilinear(src: &[u8], sw: u32, sh: u32, tw: u32, th: u32) -> Vec<u8> {
+    let (sw, sh, tw, th) = (sw as usize, sh as usize, tw as usize, th as usize);
+    let sample = |data: &[u8], w: usize, x: usize, y: usize, c: usize| -> f32 {
+        f32::from(data[(y * w + x) * 4 + c])
+    };
+    let mut dst = vec![0u8; tw * th * 4];
+    for ty in 0..th {
+        for tx in 0..tw {
+            // 目标像素中心映射回源图坐标，越界时取边缘值
+            let fx = ((tx as f32 + 0.5) * sw as f32 / tw as f32 - 0.5).clamp(0.0, (sw - 1) as f32);
+            let fy = ((ty as f32 + 0.5) * sh as f32 / th as f32 - 0.5).clamp(0.0, (sh - 1) as f32);
+            let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+            let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
+            let (dx, dy) = (fx - x0 as f32, fy - y0 as f32);
+            let d = (ty * tw + tx) * 4;
+            for c in 0..4 {
+                let top = sample(src, sw, x0, y0, c) * (1.0 - dx) + sample(src, sw, x1, y0, c) * dx;
+                let bottom =
+                    sample(src, sw, x0, y1, c) * (1.0 - dx) + sample(src, sw, x1, y1, c) * dx;
+                dst[d + c] = (top * (1.0 - dy) + bottom * dy) as u8;
+            }
+        }
+    }
+    dst
+}
+
+/// 把 png 解码出的 8-bit 颜色布局统一成 RGBA；调色板图经过解码变换后不会出现，万一出现就按失败处理
+fn normalize_rgba(raw: &[u8], ct: png::ColorType) -> Option<Vec<u8>> {
+    match ct {
+        png::ColorType::Rgba => Some(raw.to_vec()),
+        png::ColorType::Rgb => Some(
+            raw.chunks(3)
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect(),
+        ),
+        png::ColorType::GrayscaleAlpha => Some(
+            raw.chunks(2)
+                .flat_map(|p| [p[0], p[0], p[0], p[1]])
+                .collect(),
+        ),
+        png::ColorType::Grayscale => Some(
+            raw.chunks(1)
+                .flat_map(|p| [p[0], p[0], p[0], 255])
+                .collect(),
+        ),
+        png::ColorType::Indexed => None,
+    }
+}
+
+/// 解码 png 并缩放到给定尺寸（尺寸由调用方先用 `fit_image_size` 算好），
+/// 居中放进带内边距的气泡像素缓冲；背景用与文字气泡相同的半透明白
+pub fn render_bubble_image_pixels(png_bytes: &[u8], target: (u32, u32)) -> Option<Vec<u8>> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    // 展开调色板和透明通道，16-bit 降到 8-bit，让输出统一是 RGBA
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::ALPHA | png::Transformations::STRIP_16,
+    );
+    let mut reader = decoder.read_info().ok()?;
+    let mut raw = vec![0u8; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut raw).ok()?;
+    let rgba = normalize_rgba(&raw, frame.color_type)?;
+    let scaled = scale_bilinear(&rgba, frame.width, frame.height, target.0, target.1);
+
+    let pad = BUBBLE_PADDING as u32;
+    let (w, h) = (target.0 + pad * 2, target.1 + pad * 2);
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for py in pixels.chunks_mut(4) {
+        py[0] = 255;
+        py[1] = 255;
+        py[2] = 255;
+        py[3] = 220;
+    }
+    let off = (pad * w + pad) as usize * 4;
+    for y in 0..target.1 as usize {
+        let src_row = y * target.0 as usize * 4;
+        let dst_row = off + y * w as usize * 4;
+        pixels[dst_row..dst_row + target.0 as usize * 4]
+            .copy_from_slice(&scaled[src_row..src_row + target.0 as usize * 4]);
+    }
+    Some(pixels)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn msg(text: &str, priority: Priority) -> BubbleContent {
         BubbleContent {
-            text: text.to_string(),
+            media: BubbleMedia::Text(text.to_string()),
             duration_secs: 0.0,
             priority,
         }
@@ -213,9 +320,9 @@ mod tests {
         enqueue(&mut q, "first", Priority::Normal);
         enqueue(&mut q, "second", Priority::Normal);
         enqueue(&mut q, "third", Priority::Normal);
-        assert_eq!(q.pop().unwrap().text, "first");
-        assert_eq!(q.pop().unwrap().text, "second");
-        assert_eq!(q.pop().unwrap().text, "third");
+        assert!(matches!(q.pop().unwrap().media, BubbleMedia::Text(ref t) if t == "first"));
+        assert!(matches!(q.pop().unwrap().media, BubbleMedia::Text(ref t) if t == "second"));
+        assert!(matches!(q.pop().unwrap().media, BubbleMedia::Text(ref t) if t == "third"));
         assert!(q.pop().is_none());
     }
 
@@ -225,19 +332,109 @@ mod tests {
         enqueue(&mut q, "low", Priority::Low);
         enqueue(&mut q, "normal", Priority::Normal);
         enqueue(&mut q, "urgent", Priority::High);
-        assert_eq!(q.pop().unwrap().text, "urgent");
-        assert_eq!(q.pop().unwrap().text, "normal");
-        assert_eq!(q.pop().unwrap().text, "low");
+        assert!(matches!(q.pop().unwrap().media, BubbleMedia::Text(ref t) if t == "urgent"));
+        assert!(matches!(q.pop().unwrap().media, BubbleMedia::Text(ref t) if t == "normal"));
+        assert!(matches!(q.pop().unwrap().media, BubbleMedia::Text(ref t) if t == "low"));
     }
 
     #[test]
     fn queue_length_and_empty() {
-        let mut q: BubbleQueue<BubbleContent> = BubbleQueue::new();
+        let mut q: BubbleQueue<BubbleContent> = BubbleQueue::default();
         assert!(q.is_empty());
         enqueue(&mut q, "a", Priority::Normal);
         assert_eq!(q.len(), 1);
         q.pop();
         assert!(q.is_empty());
+    }
+
+    fn encode_png_as(color: png::ColorType, width: u32, height: u32, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, width, height);
+            enc.set_color(color);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(data).unwrap();
+        }
+        out
+    }
+
+    fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        encode_png_as(png::ColorType::Rgba, width, height, rgba)
+    }
+
+    fn pixel_at(pixels: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = (y * w + x) as usize * 4;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    }
+
+    #[test]
+    fn image_fit_keeps_ratio_and_scales_longer_side() {
+        let base = BUBBLE_IMAGE_BASE as u32;
+        // 长边缩到基准，短边按比例；横图竖图各验一次
+        assert_eq!(fit_image_size(base * 2, base, 1.0), (base, base / 2));
+        assert_eq!(fit_image_size(base, base * 2, 1.0), (base / 2, base));
+        // 系数乘在两维上
+        assert_eq!(fit_image_size(base * 2, base, 2.0), (base * 2, base));
+        // 系数超出范围时按边界值
+        assert_eq!(fit_image_size(100, 50, 10.0), fit_image_size(100, 50, 3.0));
+        assert_eq!(fit_image_size(100, 50, 0.0), fit_image_size(100, 50, 0.5));
+    }
+
+    #[test]
+    fn image_render_centers_image_on_background() {
+        // 4×4 纯色 png 缩到 2×2：中心两行是图像，四周内边距是背景色
+        let png = encode_png(4, 4, &[200u8, 30, 30, 255].repeat(4 * 4));
+        let pixels = render_bubble_image_pixels(&png, (2, 2)).expect("应能解码渲染");
+        let pad = BUBBLE_PADDING as u32;
+        let w = 2 + pad * 2;
+        assert_eq!(pixels.len(), (w * w * 4) as usize);
+        assert_eq!(pixel_at(&pixels, w, pad, pad), [200, 30, 30, 255]);
+        assert_eq!(pixel_at(&pixels, w, 0, 0), [255, 255, 255, 220]);
+        // 图像 alpha 原样保留（无黑底）
+        assert_eq!(pixel_at(&pixels, w, pad, pad)[3], 255);
+    }
+
+    #[test]
+    fn image_render_expands_non_rgba_colors() {
+        // 同一个灰度值 / RGB / 灰度+alpha 的 1×1 png 渲染后都应展开成对应的 RGBA
+        let cases: [(png::ColorType, Vec<u8>, [u8; 4]); 3] = [
+            (png::ColorType::Rgb, vec![1, 2, 3], [1, 2, 3, 255]),
+            (png::ColorType::Grayscale, vec![77], [77, 77, 77, 255]),
+            (
+                png::ColorType::GrayscaleAlpha,
+                vec![77, 200],
+                [77, 77, 77, 200],
+            ),
+        ];
+        for (color, data, want) in cases {
+            let png = encode_png_as(color, 1, 1, &data);
+            let pixels = render_bubble_image_pixels(&png, (1, 1)).expect("应能解码渲染");
+            let pad = BUBBLE_PADDING as u32;
+            let w = 1 + pad * 2;
+            assert_eq!(pixel_at(&pixels, w, pad, pad), want);
+        }
+    }
+
+    #[test]
+    fn image_render_rejects_garbage_bytes() {
+        assert!(render_bubble_image_pixels(b"not a png", (2, 2)).is_none());
+    }
+
+    #[test]
+    fn bilinear_solid_color_stays_solid() {
+        // 纯色图任意缩放后仍是同一颜色
+        let solid = [10u8, 20, 30, 255].repeat(2 * 2);
+        assert_eq!(
+            scale_bilinear(&solid, 2, 2, 4, 4),
+            [10u8, 20, 30, 255].repeat(4 * 4)
+        );
+        // 黑白各半的 2×1 图放大到 4×1：第二格落在黑白之间 1/4 处，颜色按权重取值
+        let src = [[0u8, 0, 0, 255], [255, 255, 255, 255]].concat();
+        let scaled = scale_bilinear(&src, 2, 1, 4, 1);
+        assert_eq!(pixel_at(&scaled, 4, 0, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel_at(&scaled, 4, 1, 0)[0], (255.0 * 0.25) as u8);
+        assert_eq!(pixel_at(&scaled, 4, 3, 0), [255, 255, 255, 255]);
     }
 
     #[test]

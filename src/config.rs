@@ -234,4 +234,4 @@ pub fn set(key: &str, value: impl Into<Value>) {
 #[allow(unsafe_code)] // 测试内修改进程环境变量（edition 2024 要求 unsafe 块）
 #[allow(clippy::wildcard_imports)] // 测试文件整批引入被测模块的项
 #[path = "config_test.rs"]
-mod tests;
+pub(crate) mod tests;
