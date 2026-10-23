@@ -864,6 +864,8 @@ impl ApplicationHandler<UserEvent> for App {
                 clip_name,
             } => {
                 log::info!("自言自语：{line}");
+                // 台词同时朗读；speak 内部检查 tts_enabled，未开时静默
+                crate::tts::speak(&line);
                 if let Some(clip) = clip_name
                     && let Some(pet) = self.pets.iter_mut().find(|p| p.id() == pet_id)
                 {
@@ -879,6 +881,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ExitApp => {
+                crate::tts::cleanup();
                 self.save_positions();
                 event_loop.exit();
             }
