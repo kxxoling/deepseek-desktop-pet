@@ -1,8 +1,14 @@
-name: Install Linux window system dependencies (cached)
+name: Install Linux packages (cached)
 description: >-
-  安装编译需要的 Linux 桌面系统 dev 包。deb 下载用 actions/cache 复用；
-  先按 runner 镜像自带的 apt 索引安装，失败再回退完整的 update + install。
-  缓存键取本文件内容的哈希，改动包列表即自动换键。
+  安装编译需要的 Linux 系统包（默认是桌面系统的 dev 包，可用 packages 输入换成别的，
+  例如 ffmpeg zstd）。deb 下载用 actions/cache 复用；先按 runner 镜像自带的 apt 索引
+  安装，失败再回退完整的 update + install。缓存键由包列表与本文件内容的哈希组成，
+  任一变化即自动换键。
+inputs:
+  packages:
+    description: 要安装的 deb 包列表（空格分隔）
+    required: false
+    default: libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
 runs:
   using: composite
   steps:
@@ -10,15 +16,12 @@ runs:
       uses: actions/cache@v6
       with:
         path: ~/apt-archives
-        key: apt-${{ runner.os }}-${{ hashFiles('.github/actions/install-linux-deps/action.yml') }}
+        key: apt-${{ runner.os }}-${{ inputs.packages }}-${{ hashFiles('.github/actions/install-linux-deps/action.yml') }}
     - name: Install
       shell: bash
       run: |
         set -euo pipefail
-        pkgs=(
-          libx11-dev libxi-dev libxcursor-dev libxrandr-dev
-          libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
-        )
+        read -ra pkgs <<< "${{ inputs.packages }}"
         cache_dir="$HOME/apt-archives"
         mkdir -p "$cache_dir"
         # Point apt's download cache at the cached dir, so restored debs are
