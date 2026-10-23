@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use library::{ClipFrames, ClipId, Library};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
@@ -76,7 +76,10 @@ struct App {
     /// 全屏自动隐藏的上次检测时刻（2 秒轮询一次）
     fullscreen_check_at: Instant,
     /// 当前显示的气泡窗口（一次最多一个，新的替换旧的）
+    /// 当前显示的气泡窗口（一次最多一个；后续消息进队列排队）
     bubble: Option<crate::bubble_window::BubbleWindow>,
+    /// 气泡消息队列，每条带上来源宠物的窗口 id，展示时据此定位
+    bubble_queue: crate::bubble::BubbleQueue<(WindowId, crate::bubble::BubbleContent)>,
     gpu: Arc<render::Gpu>,
     proxy: EventLoopProxy<UserEvent>,
     pets: Vec<PetWindow>,
@@ -871,14 +874,15 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     pet.trigger_clip(&clip);
                 }
-                // 在宠物上方显示气泡
-                if let Some(pet) = self.pets.iter().find(|p| p.id() == pet_id)
-                    && let Some((pos, size)) = pet.window_position_and_size()
-                {
-                    self.bubble = Some(crate::bubble_window::BubbleWindow::new(
-                        event_loop, &self.gpu, pos, size, &line,
-                    ));
-                }
+                // 气泡走统一队列：串行展示，当前气泡关闭后按优先级取下一条
+                self.show_bubble(
+                    pet_id,
+                    crate::bubble::BubbleContent {
+                        text: line.clone(),
+                        duration_secs: 0.0,
+                        priority: crate::bubble::Priority::Normal,
+                    },
+                );
             }
             UserEvent::ExitApp => {
                 crate::tts::cleanup();
@@ -910,6 +914,20 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             _ => {
+                // 点击气泡翻页，已是末页则关闭。气泡窗不在宠物列表里，需要在这里单独处理
+                if let WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } = &event
+                    && let Some(bubble) = self.bubble.as_mut()
+                    && bubble.window_id() == window_id
+                {
+                    if !bubble.next_page() {
+                        self.bubble = None;
+                    }
+                    return;
+                }
                 let Some(pos) = self.pets.iter().position(|p| p.id() == window_id) else {
                     return;
                 };
@@ -959,6 +977,37 @@ impl ApplicationHandler<UserEvent> for App {
             self.bubble = None;
         }
 
+        // 当前没有气泡时从队列取下一条；来源宠物已关掉的消息直接丢弃
+        while self.bubble.is_none()
+            && let Some((pet_id, content)) = self.bubble_queue.pop()
+            && let Some((pos, size)) = self
+                .pets
+                .iter()
+                .find(|p| p.id() == pet_id)
+                .and_then(window::PetWindow::window_position_and_size)
+        {
+            self.bubble = Some(crate::bubble_window::BubbleWindow::new(
+                event_loop,
+                &self.gpu,
+                pet_id,
+                pos,
+                size,
+                &content.text,
+                content.duration_secs,
+            ));
+        }
+
+        // 气泡跟随所属宠物移动
+        if let Some(bubble) = self.bubble.as_mut()
+            && let Some((pos, size)) = self
+                .pets
+                .iter()
+                .find(|p| p.id() == bubble.pet_id())
+                .and_then(window::PetWindow::window_position_and_size)
+        {
+            bubble.follow(pos, size);
+        }
+
         // 每 2 秒检测一次全屏，有应用全屏时自动隐藏，退出全屏后恢复
         // （只做显示/隐藏切换，不覆盖用户手动隐藏的状态）
         if now.duration_since(self.fullscreen_check_at).as_secs_f64() >= 2.0 {
@@ -995,6 +1044,11 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    /// 气泡统一入口：消息入队，当前气泡关闭后由事件循环按优先级取出显示
+    fn show_bubble(&mut self, pet_id: WindowId, content: crate::bubble::BubbleContent) {
+        self.bubble_queue.push(content.priority, (pet_id, content));
+    }
+
     /// 窗口状态进物理世界、解算、结果写回（与宠物列表同下标对齐）
     fn step_physics(&mut self, now: Instant) {
         let dt = now
@@ -1174,6 +1228,7 @@ fn main() {
         pets_hidden: false,
         fullscreen_check_at: Instant::now(),
         bubble: None,
+        bubble_queue: crate::bubble::BubbleQueue::new(),
         gpu,
         proxy,
         pets: Vec::new(),
