@@ -61,6 +61,11 @@ pub enum UserEvent {
         pet_id: WindowId,
         png: Vec<u8>,
     },
+    /// 宠物吃掉了一个拖进来的文件
+    PetAte {
+        pet_id: WindowId,
+        line: String,
+    },
     ExitApp,
 }
 
@@ -895,6 +900,23 @@ impl ApplicationHandler<UserEvent> for App {
                     pet_id,
                     crate::bubble::BubbleContent {
                         media: crate::bubble::BubbleMedia::Image(png),
+                        duration_secs: 0.0,
+                        priority: crate::bubble::Priority::Normal,
+                    },
+                );
+            }
+            UserEvent::PetAte { pet_id, line } => {
+                log::info!("吃掉文件：{line}");
+                // 吃东西用「吃Token」的动画
+                if let Some(clip) = crate::selftalk::matching_text_clip("吃Token")
+                    && let Some(pet) = self.pets.iter_mut().find(|p| p.id() == pet_id)
+                {
+                    pet.trigger_clip(clip);
+                }
+                self.show_bubble(
+                    pet_id,
+                    crate::bubble::BubbleContent {
+                        media: crate::bubble::BubbleMedia::Text(line),
                         duration_secs: 0.0,
                         priority: crate::bubble::Priority::Normal,
                     },

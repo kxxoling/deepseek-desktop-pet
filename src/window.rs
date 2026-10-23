@@ -798,10 +798,30 @@ impl PetWindow {
         }
     }
 
+    /// 拖文件到宠物身上算「吃掉」：计数加一，出气泡汇报并播放吃的动画
+    fn eat_file(&mut self, path: &std::path::Path) {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            return;
+        };
+        // 累计数量记在 config 的 eaten_count 里
+        let count = crate::selftalk::record_eaten_with(
+            || crate::config::get_u64("eaten_count").unwrap_or(0),
+            |n| crate::config::set("eaten_count", n),
+        );
+        let _ = self.proxy.send_event(crate::UserEvent::PetAte {
+            pet_id: self.id(),
+            line: crate::selftalk::eat_line(&name, count),
+        });
+    }
+
     // ---------- 交互事件 ----------
 
     pub fn on_window_event(&mut self, event: &WindowEvent) -> Option<WindowRequest> {
         match event {
+            WindowEvent::DroppedFile(path) => {
+                self.eat_file(path);
+                None
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.last_interaction = Instant::now();
                 let scale = self.window.scale_factor();
