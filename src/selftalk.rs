@@ -85,6 +85,18 @@ pub fn read_image(files: &[std::path::PathBuf], roll: f64) -> Option<Vec<u8>> {
     std::fs::read(&files[idx]).ok()
 }
 
+/// 吃掉文件后汇报的台词：带上文件名和累计数量
+pub fn eat_line(file_name: &str, count: u64) -> String {
+    format!("吃掉了 {file_name}，一共吃了 {count} 个")
+}
+
+/// 吃掉一个，计数加一并写回，返回新的累计数量；读写的来源由调用方注入，方便测试
+pub fn record_eaten_with(read: impl Fn() -> u64, write: impl Fn(u64)) -> u64 {
+    let count = read() + 1;
+    write(count);
+    count
+}
+
 /// 台词是否绑定了动画（台词名与片段名精确匹配）
 pub fn matching_text_clip(line: &str) -> Option<&'static str> {
     TEXT_CLIP_NAMES.iter().find(|name| **name == line).copied()
@@ -138,6 +150,21 @@ mod tests {
     #[test]
     fn pick_line_empty_returns_empty() {
         assert_eq!(pick_line(&[], None, 0.5), "");
+    }
+
+    #[test]
+    fn record_eaten_increments_and_writes_back() {
+        let eaten = std::cell::Cell::new(2u64);
+        let count = record_eaten_with(|| eaten.get(), |c| eaten.set(c));
+        assert_eq!(count, eaten.get());
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn eat_line_mentions_file_and_count() {
+        let line = eat_line("笔记.txt", 3);
+        assert!(line.contains("笔记.txt"));
+        assert!(line.contains(&3.to_string()));
     }
 
     #[test]
