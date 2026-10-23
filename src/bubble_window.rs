@@ -9,21 +9,20 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::bubble::{
-    BUBBLE_DURATION_SECS, BUBBLE_MAX_WIDTH, BUBBLE_PADDING, bubble_position, bubble_size, paginate,
-    render_bubble_pixels,
+    BUBBLE_DURATION_SECS, BUBBLE_MAX_WIDTH, BUBBLE_PADDING, bubble_position, bubble_size,
+    fit_image_size, paginate, render_bubble_image_pixels, render_bubble_pixels,
 };
 use crate::render::{Gpu, PetSurface};
 
-/// 气泡窗口：在所属宠物上方显示文字，长文分页、点击翻页，超时由 main 关闭
+/// 气泡窗口：在所属宠物上方显示文字或配图，长文分页、点击翻页，超时由 main 关闭
 pub struct BubbleWindow {
     window: Arc<Window>,
     surface: PetSurface,
     gpu: Arc<Gpu>,
     pet_id: WindowId,
-    text: String,
-    pages: Vec<Vec<crate::text::LineSpan>>,
+    /// 预渲染的每一页像素与尺寸，文字页与配图页结构相同
+    pages: Vec<(Vec<u8>, u32, u32)>,
     page_idx: usize,
-    font_size: f64,
     /// 窗口逻辑尺寸（跟随宠物时复算位置用）
     size: (f64, f64),
     /// 上次设置的窗口位置，位置没有变化就不重复调用 `set_outer_position`
@@ -32,8 +31,8 @@ pub struct BubbleWindow {
 }
 
 impl BubbleWindow {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    /// 文字气泡：换行分页后逐页光栅化
+    pub fn new_text(
         event_loop: &ActiveEventLoop,
         gpu: &Arc<Gpu>,
         pet_id: WindowId,
@@ -44,11 +43,69 @@ impl BubbleWindow {
     ) -> Self {
         let lines =
             crate::text::wrap_default(text, (BUBBLE_MAX_WIDTH - BUBBLE_PADDING * 2.0) as f32);
-        let pages = paginate(&lines);
         let font_size = 16.0;
-        // 窗口高度按最大一页算：翻页只换内容，尺寸不变，避免窗口跳动
-        let max_lines = pages.iter().map(Vec::len).max().unwrap_or_default();
-        let (w, h) = bubble_size(max_lines, font_size);
+        let pages: Vec<(Vec<u8>, u32, u32)> = paginate(&lines)
+            .into_iter()
+            .map(|page| {
+                let pixels = render_bubble_pixels(text, &page, font_size);
+                let (w, h) = bubble_size(page.len(), font_size);
+                (pixels, w as u32, h as u32)
+            })
+            .collect();
+        Self::from_pages(
+            event_loop,
+            gpu,
+            pet_id,
+            pet_pos,
+            pet_size,
+            pages,
+            duration_secs,
+        )
+    }
+
+    /// 配图气泡：按 config `bubble_image_scale` 等比缩放后铺在气泡底色上；解码失败返回 None
+    pub fn new_image(
+        event_loop: &ActiveEventLoop,
+        gpu: &Arc<Gpu>,
+        pet_id: WindowId,
+        pet_pos: (f64, f64),
+        pet_size: (f64, f64),
+        png: &[u8],
+        duration_secs: f64,
+    ) -> Option<Self> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png));
+        let reader = decoder.read_info().ok()?;
+        let (iw, ih) = (reader.info().width, reader.info().height);
+        let scale = crate::config::get_f64("bubble_image_scale").unwrap_or(1.0);
+        let target = fit_image_size(iw, ih, scale);
+        let pixels = render_bubble_image_pixels(png, target)?;
+        let pad = BUBBLE_PADDING as u32;
+        Some(Self::from_pages(
+            event_loop,
+            gpu,
+            pet_id,
+            pet_pos,
+            pet_size,
+            vec![(pixels, target.0 + pad * 2, target.1 + pad * 2)],
+            duration_secs,
+        ))
+    }
+
+    /// 窗口按最大一页的尺寸创建：翻页只换内容，尺寸不变，避免窗口跳动
+    #[allow(clippy::too_many_arguments)]
+    fn from_pages(
+        event_loop: &ActiveEventLoop,
+        gpu: &Arc<Gpu>,
+        pet_id: WindowId,
+        pet_pos: (f64, f64),
+        pet_size: (f64, f64),
+        pages: Vec<(Vec<u8>, u32, u32)>,
+        duration_secs: f64,
+    ) -> Self {
+        let (w, h) = pages.iter().fold((0u32, 0u32), |(mw, mh), (_, pw, ph)| {
+            (mw.max(*pw), mh.max(*ph))
+        });
+        let (w, h) = (f64::from(w), f64::from(h));
         let (x, y) = bubble_position(pet_pos, pet_size, (w, h));
         let duration = if duration_secs > 0.0 {
             duration_secs
@@ -79,10 +136,8 @@ impl BubbleWindow {
             surface,
             gpu: gpu.clone(),
             pet_id,
-            text: text.to_string(),
             pages,
             page_idx: 0,
-            font_size,
             size: (w, h),
             last_pos: (x, y),
             expires_at: Instant::now() + std::time::Duration::from_secs_f64(duration),
@@ -91,10 +146,10 @@ impl BubbleWindow {
         bubble
     }
 
-    /// 把当前页画成像素并上传到 GPU
+    /// 把当前页上传到 GPU
     fn render_page(&self) {
-        let pixels = render_bubble_pixels(&self.text, &self.pages[self.page_idx], self.font_size);
-        self.surface.upload(&self.gpu, &pixels);
+        let (pixels, _, _) = &self.pages[self.page_idx];
+        self.surface.upload(&self.gpu, pixels);
         self.window.request_redraw();
     }
 

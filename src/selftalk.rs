@@ -49,6 +49,42 @@ pub fn should_talk_on_click(enabled: bool, chance: f64, roll: f64) -> bool {
     enabled && roll < chance.clamp(0.0, 1.0)
 }
 
+/// 是否出配图：图片池有内容且随机值落在概率内；先掷骰决定出图还是出文字，再进对应的池子挑内容
+pub fn should_show_image(has_images: bool, chance: f64, roll: f64) -> bool {
+    has_images && roll < chance.clamp(0.0, 1.0)
+}
+
+/// 列出目录里的 png；排序保证 roll 与文件的对应关系稳定，目录不存在视作没有图
+pub fn image_files_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(std::result::Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// 配图目录：数据目录（config.json 所在目录）下的 `self_talk_images/`
+pub fn image_files_from_config() -> Vec<std::path::PathBuf> {
+    crate::config::config_path()
+        .parent()
+        .map(|d| image_files_in(&d.join("self_talk_images")))
+        .unwrap_or_default()
+}
+
+/// 按随机值从列表读一张图的字节
+pub fn read_image(files: &[std::path::PathBuf], roll: f64) -> Option<Vec<u8>> {
+    let idx = crate::assets::roll_index(files.len(), roll)?;
+    std::fs::read(&files[idx]).ok()
+}
+
 /// 台词是否绑定了动画（台词名与片段名精确匹配）
 pub fn matching_text_clip(line: &str) -> Option<&'static str> {
     TEXT_CLIP_NAMES.iter().find(|name| **name == line).copied()
@@ -102,6 +138,61 @@ mod tests {
     #[test]
     fn pick_line_empty_returns_empty() {
         assert_eq!(pick_line(&[], None, 0.5), "");
+    }
+
+    #[test]
+    fn image_chance_gates_on_pool_and_roll() {
+        let chance = 0.3_f64;
+        // 没有图片时概率再高也走文字
+        assert!(!should_show_image(false, 1.0, 0.0));
+        assert!(should_show_image(true, chance, 0.0));
+        assert!(!should_show_image(true, chance, chance));
+        // 概率越界钳制
+        assert!(!should_show_image(true, 0.0, 0.0));
+        assert!(should_show_image(true, 1.0 + chance, 1.0 - chance / 4.0));
+    }
+
+    #[test]
+    fn image_files_lists_sorted_pngs_only() {
+        let dir = std::env::temp_dir().join(format!("ds-pet-selftalk-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.png"), b"png-b").unwrap();
+        std::fs::write(dir.join("a.PNG"), b"png-a").unwrap();
+        std::fs::write(dir.join("note.txt"), b"txt").unwrap();
+        let files = image_files_in(&dir);
+        // 扩展名大小写都认，非 png 不收，排序稳定
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with("a.PNG"));
+        assert!(files[1].ends_with("b.png"));
+        // 目录不存在视作没有图
+        assert_eq!(image_files_in(&dir.join("nope")).len(), 0);
+        // 按随机值能读回字节
+        assert_eq!(
+            read_image(&files, 0.0).as_deref(),
+            Some(b"png-a".as_slice())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn image_files_from_config_reads_data_dir() {
+        // 与 config_test 的用例共用同一把锁：都动 DS_PET_CONFIG 这个环境变量
+        let _guard = crate::config::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = std::env::temp_dir().join(format!("ds-pet-selftalk-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("self_talk_images")).unwrap();
+        std::fs::write(home.join("self_talk_images/a.png"), b"png-a").unwrap();
+        unsafe {
+            std::env::set_var("DS_PET_CONFIG", home.join("config.json"));
+        }
+        let files = image_files_from_config();
+        unsafe {
+            std::env::remove_var("DS_PET_CONFIG");
+        }
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("a.png"));
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

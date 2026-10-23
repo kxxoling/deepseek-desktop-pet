@@ -18,8 +18,8 @@ fn ensure_logger() {
     });
 }
 
-/// 修改环境变量的用例互斥串行
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// 修改环境变量的用例互斥串行；其他模块动 `DS_PET_CONFIG` 的用例也用同一把锁
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn temp_root(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
