@@ -93,7 +93,8 @@ fn synth_and_play(text: &str) -> Result<(), String> {
         return Err(format!("合成器退出码异常：{status}"));
     }
     let bytes = std::fs::read(&out).map_err(|e| format!("读取合成产物失败：{e}"))?;
-    crate::audio::play(&bytes);
+    // 朗读按合成器的原始响度播放
+    crate::audio::play(&bytes, 1.0);
     Ok(())
 }
 

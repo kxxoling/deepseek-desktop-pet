@@ -17,6 +17,46 @@ pub fn click_sound() -> Option<&'static [u8]> {
     CLICK_SOUND.get_or_init(load_click_sound_file).as_deref()
 }
 
+/// 解析点击音效要播的字节：custom 包用数据目录的自定义音效（click.wav
+/// 优先，其次 custom/ 目录里按 roll 挑一个）；其余包名和找不到自定义
+/// 文件的情况都回退内置音效
+pub fn click_sound_for(pack: &str, roll: f64) -> Option<Vec<u8>> {
+    if pack == "custom"
+        && let Some(bytes) = custom_click_sound(roll)
+    {
+        return Some(bytes);
+    }
+    click_sound().map(<[u8]>::to_vec)
+}
+
+/// 数据目录取配置文件所在目录（config.json 旁边的 sounds/）
+fn custom_click_sound(roll: f64) -> Option<Vec<u8>> {
+    let root = crate::config::config_path().parent()?.join("sounds");
+    // 单独的 click.wav 优先于 custom/ 目录
+    if let Ok(bytes) = std::fs::read(root.join("click.wav")) {
+        return Some(bytes);
+    }
+    let mut names: Vec<String> = std::fs::read_dir(root.join("custom"))
+        .ok()?
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.to_ascii_lowercase().ends_with(".wav"))
+        .collect();
+    // read_dir 顺序因平台而异，排序保证 roll 与文件的对应关系稳定
+    names.sort();
+    let pick = pick_by_roll(&names, roll)?;
+    std::fs::read(root.join("custom").join(pick)).ok()
+}
+
+/// 按 roll ∈ [0,1] 从非空列表挑一个；空列表返回 None
+pub(crate) fn pick_by_roll(names: &[String], roll: f64) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let idx = (roll.clamp(0.0, 1.0) * names.len() as f64) as usize;
+    Some(names[idx.min(names.len() - 1)].clone())
+}
+
 pub fn locate_assets_root() -> PathBuf {
     if let Ok(p) = std::env::var("DS_PET_ASSETS") {
         let p = PathBuf::from(p);
@@ -180,5 +220,71 @@ mod tests {
             std::env::remove_var("DS_PET_ASSETS");
         }
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn pick_by_roll_covers_list_in_order() {
+        let names: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(pick_by_roll(&names, 0.0).as_deref(), Some("a"));
+        assert_eq!(
+            pick_by_roll(&names, 1.0 / names.len() as f64).as_deref(),
+            Some("b")
+        );
+        // roll 上界钳到最后一个
+        assert_eq!(pick_by_roll(&names, 1.0).as_deref(), Some("c"));
+        assert_eq!(pick_by_roll(&[], 0.5), None);
+    }
+
+    #[test]
+    fn custom_pack_prefers_single_file_then_random_dir() {
+        ensure_logger();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = temp_root("custompack");
+        std::fs::create_dir_all(home.join("sounds/custom")).unwrap();
+        std::fs::write(home.join("sounds/custom/second.wav"), b"RIFF-two").unwrap();
+        unsafe {
+            std::env::set_var("DS_PET_CONFIG", home.join("config.json"));
+        }
+        // custom/ 只有一个文件时任意 roll 都选中它
+        assert_eq!(
+            click_sound_for("custom", 0.99).as_deref(),
+            Some(b"RIFF-two".as_slice())
+        );
+        // 单独的 click.wav 优先于 custom/ 目录
+        std::fs::write(home.join("sounds/click.wav"), b"RIFF-one").unwrap();
+        assert_eq!(
+            click_sound_for("custom", 0.0).as_deref(),
+            Some(b"RIFF-one".as_slice())
+        );
+        unsafe {
+            std::env::remove_var("DS_PET_CONFIG");
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn unconfigured_custom_or_unknown_pack_falls_back_to_builtin() {
+        ensure_logger();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 数据目录没有任何自定义音效时，custom 与未知包名都回退内置默认
+        let home = temp_root("fallbackpack");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("DS_PET_CONFIG", home.join("config.json"));
+        }
+        let builtin = std::fs::read("assets/sounds/default/click.wav").unwrap();
+        assert_eq!(click_sound_for("custom", 0.0).unwrap(), builtin);
+        assert_eq!(click_sound_for("duck", 0.0).unwrap(), builtin);
+        unsafe {
+            std::env::remove_var("DS_PET_CONFIG");
+        }
+        std::fs::remove_dir_all(&home).ok();
     }
 }
