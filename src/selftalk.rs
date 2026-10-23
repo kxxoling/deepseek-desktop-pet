@@ -44,6 +44,11 @@ pub fn pick_line(lines: &[String], last: Option<&str>, roll: f64) -> String {
     candidates[idx].clone()
 }
 
+/// 单击回应是否说话：开关打开且随机值落在概率内；概率越界时钳制到 0.0–1.0
+pub fn should_talk_on_click(enabled: bool, chance: f64, roll: f64) -> bool {
+    enabled && roll < chance.clamp(0.0, 1.0)
+}
+
 /// 台词是否绑定了动画（台词名与片段名精确匹配）
 pub fn matching_text_clip(line: &str) -> Option<&'static str> {
     TEXT_CLIP_NAMES.iter().find(|name| **name == line).copied()
@@ -97,6 +102,20 @@ mod tests {
     #[test]
     fn pick_line_empty_returns_empty() {
         assert_eq!(pick_line(&[], None, 0.5), "");
+    }
+
+    #[test]
+    fn click_talk_respects_switch_and_chance() {
+        let chance = 0.25_f64;
+        // 开关关掉时随机值再小也不说
+        assert!(!should_talk_on_click(false, chance, 0.0));
+        // 随机值落在概率内才说；正好落在边界上不算
+        assert!(should_talk_on_click(true, chance, 0.0));
+        assert!(!should_talk_on_click(true, chance, chance));
+        // 概率越界时钳制：0 或负数永远不说，超过 1 等于全说
+        assert!(!should_talk_on_click(true, 0.0, 0.0));
+        assert!(!should_talk_on_click(true, -chance, 0.0));
+        assert!(should_talk_on_click(true, 1.0 + chance, 1.0 - chance / 4.0));
     }
 
     #[test]
