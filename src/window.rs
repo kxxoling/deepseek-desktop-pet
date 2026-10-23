@@ -766,6 +766,32 @@ impl PetWindow {
         self.next_selftalk_at = now_selftalk_at();
     }
 
+    /// 单击回应时有概率说一句话，台词与动画走待机自言自语的同一条链路；
+    /// config `self_talk_on_click` 开关（默认开）、`self_talk_on_click_chance` 概率（默认 0.25）
+    fn maybe_talk_on_click(&mut self) {
+        let enabled = crate::config::get_bool("self_talk_on_click").unwrap_or(true);
+        let chance = crate::config::get_f64("self_talk_on_click_chance").unwrap_or(0.25);
+        let roll = crate::anim::rand_range(0.0, 1.0);
+        if !crate::selftalk::should_talk_on_click(enabled, chance, roll) {
+            return;
+        }
+        let lines = crate::selftalk::lines_from_config();
+        // 挑台词另掷一个随机值：和概率判定共用一个的话，命中时取值总在概率区间内，
+        // 台词就总在列表前段打转
+        let pick_roll = crate::anim::rand_range(0.0, 1.0);
+        let line = crate::selftalk::pick_line(&lines, self.last_selftalk.as_deref(), pick_roll);
+        if line.is_empty() {
+            return;
+        }
+        self.last_selftalk = Some(line.clone());
+        let clip = crate::selftalk::matching_text_clip(&line);
+        let _ = self.proxy.send_event(crate::UserEvent::SelfTalk {
+            pet_id: self.id(),
+            line,
+            clip_name: clip.map(str::to_string),
+        });
+    }
+
     // ---------- 交互事件 ----------
 
     pub fn on_window_event(&mut self, event: &WindowEvent) -> Option<WindowRequest> {
@@ -920,6 +946,7 @@ impl PetWindow {
         if action == Action::Click {
             self.play_oneshot_in("click");
             Self::play_click_sound();
+            self.maybe_talk_on_click();
         }
         None
     }
