@@ -31,7 +31,7 @@ wgpu = "29"
 winit = "0.30"
 fontdue = "0.9"
 rodio = { version = "0.20", default-features = false, features = ["wav"] }
-zstd = "0.13"
+zstd = "0.14"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSEvent", "NSResponder", "NSApplication", "NSView", "NSMenu", "NSColor"] }
