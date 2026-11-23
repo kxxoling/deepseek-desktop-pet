@@ -20,6 +20,10 @@ pub struct BubbleWindow {
     surface: PetSurface,
     gpu: Arc<Gpu>,
     pet_id: WindowId,
+    #[cfg(target_os = "windows")]
+    hwnd: Option<windows::Win32::Foundation::HWND>,
+    #[cfg(target_os = "windows")]
+    bitmap: Option<crate::platform::windows_layered::LayeredBitmap>,
     /// 预渲染的每一页像素与尺寸，文字页与配图页结构相同
     pages: Vec<(Vec<u8>, u32, u32)>,
     page_idx: usize,
@@ -129,13 +133,29 @@ impl BubbleWindow {
             .create_surface(window.clone())
             .expect("气泡 surface 创建失败");
         #[cfg(target_os = "windows")]
-        let surface = gpu.create_surface(&window);
+        let (surface, hwnd, bitmap) = {
+            let surface = gpu.create_surface(&window);
+            let hwnd = crate::platform::windows_layered::hwnd(&window);
+            if let Some(h) = hwnd {
+                crate::platform::windows_layered::make_layered(h);
+            }
+            let size = window.inner_size();
+            let bitmap = crate::platform::windows_layered::LayeredBitmap::new(
+                size.width.max(1),
+                size.height.max(1),
+            );
+            (surface, hwnd, bitmap)
+        };
 
         let bubble = Self {
             window,
             surface,
             gpu: gpu.clone(),
             pet_id,
+            #[cfg(target_os = "windows")]
+            hwnd,
+            #[cfg(target_os = "windows")]
+            bitmap,
             pages,
             page_idx: 0,
             size: (w, h),
@@ -186,16 +206,16 @@ impl BubbleWindow {
     }
 
     /// 渲染到屏幕（RedrawRequested 时由 main 调用）
-    // Windows 分层窗口路径待接入，方法体为空，self 暂未使用
-    #[cfg_attr(target_os = "windows", allow(clippy::unused_self))]
     pub fn draw(&mut self) {
         #[cfg(not(target_os = "windows"))]
-        {
-            let _ = self.surface.render(&self.gpu);
+        if let Err(e) = self.surface.render(&self.gpu) {
+            log::error!("气泡渲染失败：{e:?}");
         }
         #[cfg(target_os = "windows")]
+        if let (Some(h), Some(b)) = (self.hwnd, self.bitmap.as_mut())
+            && let Err(e) = self.surface.render(&self.gpu, h, b, u8::MAX)
         {
-            // Windows 分层窗口路径需要 hwnd 和 bitmap，待后续接入
+            log::error!("气泡渲染失败：{e:?}");
         }
     }
 }
