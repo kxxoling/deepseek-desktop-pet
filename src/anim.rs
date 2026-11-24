@@ -150,7 +150,7 @@ pub fn sched_snapshot(lib: &Library) -> SchedSnapshot {
     SchedSnapshot {
         turn_available: !lib.clips_in_category("turn").is_empty(),
         walk_available: lib.clips_in_category("move").iter().any(|id| {
-            let name = lib.meta(id).map(|m| m.name.to_string()).unwrap_or_default();
+            let name = lib.meta(id).map_or_default(|m| m.name.to_string());
             lib.move_strides.contains_key(&name)
         }),
     }
@@ -260,7 +260,7 @@ impl Anim {
         self.pending = Some(next);
     }
 
-    /// 取走 `OneShot` 播完后的去向（一次性）
+    /// 返回 `OneShot` 播完后的去向并清空；只有第一次能取到
     pub fn take_pending(&mut self) -> Option<Plan> {
         self.pending.take()
     }
@@ -339,7 +339,7 @@ impl Anim {
         true
     }
 
-    /// 取走行走结束后待播的触发片段；只有第一次能取到
+    /// 取出行走结束后要接着播放的触发片段；只有第一次能取到
     pub fn take_pending_trigger(&mut self) -> Option<ClipId> {
         self.pending_trigger.take()
     }

@@ -117,7 +117,6 @@ fn now_selftalk_at() -> Instant {
 
 impl PetWindow {
     #[allow(clippy::too_many_lines)]
-    #[allow(clippy::too_many_lines)]
     pub fn new(
         event_loop: &ActiveEventLoop,
         lib: Arc<Library>,
@@ -458,8 +457,7 @@ impl PetWindow {
             let name = self
                 .lib
                 .meta(&self.anim.clip)
-                .map(|m| m.name.to_string())
-                .unwrap_or_default();
+                .map_or_default(|m| m.name.to_string());
             self.anim.mirrored = *dir == WalkDir::Right && !self.lib.no_mirror(&name);
         }
     }

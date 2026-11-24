@@ -56,17 +56,15 @@ pub fn should_show_image(has_images: bool, chance: f64, roll: f64) -> bool {
 
 /// 列出目录里的 png；排序保证 roll 与文件的对应关系稳定，目录不存在视作没有图
 pub fn image_files_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(std::result::Result::ok)
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir).map_or_default(|rd| {
+        rd.filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+            })
+            .collect()
+    });
     files.sort();
     files
 }
@@ -75,8 +73,7 @@ pub fn image_files_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 pub fn image_files_from_config() -> Vec<std::path::PathBuf> {
     crate::config::config_path()
         .parent()
-        .map(|d| image_files_in(&d.join("self_talk_images")))
-        .unwrap_or_default()
+        .map_or_default(|d| image_files_in(&d.join("self_talk_images")))
 }
 
 /// 按随机值从列表读一张图的字节
