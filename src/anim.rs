@@ -150,7 +150,7 @@ pub fn sched_snapshot(lib: &Library) -> SchedSnapshot {
     SchedSnapshot {
         turn_available: !lib.clips_in_category("turn").is_empty(),
         walk_available: lib.clips_in_category("move").iter().any(|id| {
-            let name = lib.meta(id).map(|m| m.name.to_string()).unwrap_or_default();
+            let name = lib.meta(id).map_or_default(|m| m.name.to_string());
             lib.move_strides.contains_key(&name)
         }),
     }
@@ -260,7 +260,7 @@ impl Anim {
         self.pending = Some(next);
     }
 
-    /// 取走 `OneShot` 播完后的去向（一次性）
+    /// 返回 `OneShot` 播完后的去向并清空；只有第一次能取到
     pub fn take_pending(&mut self) -> Option<Plan> {
         self.pending.take()
     }
@@ -339,7 +339,7 @@ impl Anim {
         true
     }
 
-    /// 取走行走结束后待播的触发片段；只有第一次能取到
+    /// 取出行走结束后要接着播放的触发片段；只有第一次能取到
     pub fn take_pending_trigger(&mut self) -> Option<ClipId> {
         self.pending_trigger.take()
     }
@@ -550,6 +550,159 @@ mod state_tests {
         );
         assert!(matches!(a.mode, Mode::Idle));
         assert!(a.next_event_at > Instant::now());
+    }
+
+    #[test]
+    fn trigger_from_idle_switches_immediately() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        a.set_event_clips(vec![(
+            ClipId(Arc::from("events/balance/拍拍")),
+            first_frame(),
+        )]);
+        assert!(a.trigger_clip("events"));
+        assert!(matches!(a.mode, Mode::OneShot));
+        assert_eq!(a.frame_len(), 1);
+        // 没有匹配候选时不切换
+        assert!(!a.trigger_clip("events/nope"));
+        // 子分类前缀能精确匹配
+        assert!(a.trigger_clip("events/balance"));
+    }
+
+    #[test]
+    fn trigger_rejected_while_dragging() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        a.set_event_clips(vec![(
+            ClipId(Arc::from("events/balance/拍拍")),
+            first_frame(),
+        )]);
+        a.set_clip(
+            &ClipId(Arc::from("drag/抓")),
+            first_frame(),
+            Some(frames_n(1)),
+            Mode::Drag,
+            false,
+        );
+        assert!(!a.trigger_clip("events"));
+        assert!(matches!(a.mode, Mode::Drag));
+    }
+
+    #[test]
+    fn trigger_while_walking_defers_to_pending() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        a.set_event_clips(vec![(
+            ClipId(Arc::from("events/balance/拍拍")),
+            first_frame(),
+        )]);
+        a.set_clip(
+            &ClipId(Arc::from("move/走")),
+            first_frame(),
+            Some(frames_n(1)),
+            Mode::Walk {
+                dir: WalkDir::Right,
+                remaining_loops: 2,
+            },
+            false,
+        );
+        assert!(a.trigger_clip("events"));
+        assert!(matches!(
+            a.mode,
+            Mode::Walk {
+                remaining_loops: 1,
+                ..
+            }
+        ));
+        // 行走结束后要接着播放的片段在这里取出；再取一次是空的
+        assert_eq!(
+            a.take_pending_trigger().unwrap().0.as_ref(),
+            "events/balance/拍拍"
+        );
+        assert!(a.take_pending_trigger().is_none());
+    }
+
+    #[test]
+    fn pending_discarded_on_clip_switch() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        a.set_event_clips(vec![(
+            ClipId(Arc::from("events/balance/拍拍")),
+            first_frame(),
+        )]);
+        a.set_clip(
+            &ClipId(Arc::from("move/走")),
+            first_frame(),
+            Some(frames_n(1)),
+            Mode::Walk {
+                dir: WalkDir::Right,
+                remaining_loops: 2,
+            },
+            false,
+        );
+        assert!(a.trigger_clip("events"));
+        // 中途切换片段会丢弃还没播放的触发请求
+        a.set_clip(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+            Mode::Idle,
+            false,
+        );
+        assert!(a.take_pending_trigger().is_none());
+    }
+
+    #[test]
+    fn set_pending_and_take_roundtrip() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        assert!(a.take_pending().is_none());
+        a.set_pending(Plan::Idle);
+        assert_eq!(a.take_pending(), Some(Plan::Idle));
+        assert!(a.take_pending().is_none());
+    }
+
+    #[test]
+    fn resync_clock_clears_next_frame_at() {
+        let mut a = Anim::new(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+        );
+        // set_clip 安排下一次帧推进，resync 后清空等待重同步
+        a.set_clip(
+            &ClipId(Arc::from("idle/x")),
+            first_frame(),
+            Some(frames_n(3)),
+            Mode::Idle,
+            false,
+        );
+        assert!(a.next_frame_at().is_some());
+        a.resync_clock();
+        assert!(a.next_frame_at().is_none());
+    }
+
+    #[test]
+    fn walk_dir_sign_and_flip() {
+        assert_eq!(WalkDir::Left.sign(), -1.0);
+        assert_eq!(WalkDir::Right.sign(), 1.0);
+        assert_eq!(WalkDir::Left.flip(), WalkDir::Right);
+        assert_eq!(WalkDir::Right.flip(), WalkDir::Left);
     }
 
     #[test]

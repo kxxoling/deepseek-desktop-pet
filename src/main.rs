@@ -1296,8 +1296,7 @@ fn main() {
         last_phys_at: Instant::now(),
         restore_queue: config::get("pet_positions")
             .as_ref()
-            .map(positions::from_value)
-            .unwrap_or_default()
+            .map_or_default(positions::from_value)
             .into(),
         pending_restore: Vec::new(),
         last_saved_positions: String::new(),

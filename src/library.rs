@@ -181,9 +181,7 @@ fn load_first_frame(meta: &ClipMeta) -> Option<Arc<Frame>> {
 
 /// 列目录条目；不可读（或非目录）返回空
 fn list_dir(dir: &Path) -> Vec<std::fs::DirEntry> {
-    std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(std::result::Result::ok).collect())
-        .unwrap_or_default()
+    std::fs::read_dir(dir).map_or_default(|rd| rd.filter_map(std::result::Result::ok).collect())
 }
 
 /// 递归收集含帧资产的目录为 clip（`clip.zst` 或 `f*.png`）
@@ -210,14 +208,12 @@ fn scan_clips(root: &Path, dir: &Path, out: &mut Vec<Arc<ClipMeta>>) {
         let category = Arc::from(
             rel.components()
                 .next()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .unwrap_or_default()
+                .map_or_default(|c| c.as_os_str().to_string_lossy().into_owned())
                 .as_str(),
         );
         let name = Arc::from(
             rel.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
+                .map_or_default(|s| s.to_string_lossy().into_owned())
                 .as_str(),
         );
         out.push(Arc::new(ClipMeta {
@@ -267,12 +263,11 @@ fn parse_meta(meta_dir: &Path) -> MetaInfo {
             let curve = item
                 .get("curve")
                 .and_then(|c| c.as_array())
-                .map(|a| {
+                .map_or_default(|a| {
                     a.iter()
                         .filter_map(serde_json::Value::as_f64)
                         .collect::<Vec<f64>>()
-                })
-                .unwrap_or_default();
+                });
             if stride > 0.0 && curve.len() >= 2 {
                 strides.insert(name.clone(), (stride, curve));
             }

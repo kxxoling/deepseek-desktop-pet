@@ -36,6 +36,8 @@ fi
 
 if command -v cargo-llvm-cov >/dev/null 2>&1; then
   echo "[pre-push] 覆盖率门槛（逻辑层 >= 95%）"
+  # 覆盖率统计缓存会残留旧工具链的数据，跨分支/工具链切换后跟代码对不上（同代码测出 78% 和 96%），测前清空重建
+  rm -rf target/llvm-cov-target
   cargo llvm-cov --quiet --summary-only \
     --ignore-filename-regex '(window|platform|render|main)\.rs' \
     --fail-under-lines 95 >/dev/null

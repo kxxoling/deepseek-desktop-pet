@@ -155,14 +155,12 @@ pub fn discover_characters(builtin_root: &Path, external_root: &Path) -> Vec<Cha
             meta: CharacterMeta::load(&builtin_root.join("meta"), BUILTIN_CHARACTER_ID),
         });
     }
-    let mut subs: Vec<PathBuf> = std::fs::read_dir(external_root)
-        .map(|rd| {
-            rd.filter_map(std::result::Result::ok)
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-                .map(|e| e.path())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut subs: Vec<PathBuf> = std::fs::read_dir(external_root).map_or_default(|rd| {
+        rd.filter_map(std::result::Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect()
+    });
     subs.sort();
     for root in subs {
         if !root.join("frames").is_dir() {
