@@ -113,6 +113,25 @@ mod tests {
     }
 
     #[test]
+    fn break_before_covers_extended_ranges() {
+        // 扩展 A 与兼容表意区也在断行白名单里（之前只测了最常用的几段）
+        assert!(is_break_before('\u{3400}'));
+        assert!(is_break_before('\u{F900}'));
+        assert!(is_break_before('\u{30A0}')); // 假名区上界
+        assert!(!is_break_before('a'));
+    }
+
+    #[test]
+    fn wrap_skips_space_at_line_start() {
+        // 断点落在空格上时，下一行不能以空格开头
+        // "aaaa bb"：最大宽 5 个半角字符，断在空格 → 第二行从 b 开始
+        let lines = wrap_text("aaaa bb", 64.0, &uniform);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&"aaaa bb"[lines[0].start..lines[0].end], "aaaa");
+        assert_eq!(&"aaaa bb"[lines[1].start..lines[1].end], "bb");
+    }
+
+    #[test]
     fn wraps_cjk_per_character() {
         // 6 个汉字，每字宽 16，最大宽 64（4 字/行）→ 2 行
         let lines = wrap_text("你好世界再见", 64.0, &uniform);
