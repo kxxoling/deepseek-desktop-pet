@@ -31,7 +31,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: stable
           components: clippy, rustfmt
           cache: false # caching is handled by rust-cache
       - uses: Swatinem/rust-cache@v2
@@ -116,7 +115,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: stable
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:
@@ -137,7 +135,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: stable
           cache: false
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -174,7 +171,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: stable
           cache: false
       - uses: Swatinem/rust-cache@v2
         with:

@@ -1,0 +1,6 @@
+# 工具链版本锁死，CI 与本地保证一致；升级编译器 = 显式修改这里的 channel
+[toolchain]
+channel = "1.99.1"
+targets = ["x86_64-pc-windows-gnu"]
+profile = "minimal"
+components = ["llvm-tools-preview", "clippy", "rustfmt"]
